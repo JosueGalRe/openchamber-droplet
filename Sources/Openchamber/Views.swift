@@ -679,9 +679,10 @@ struct OpenchamberSettings: View {
         }
     }
 
-    /// The address, and why the last attempt failed, behind the row's (i).
+    /// How the server is reached, and why the last attempt failed, behind the row's (i).
     private func tip(for server: ChamberServer) -> String {
-        let address = server.baseURL.origin
+        let address = droplet.serverStates[server.id]?.route
+            ?? (server.directURLs.map(\.origin) + (server.relay == nil ? [] : ["OpenChamber's relay"])).joined(separator: ", ")
         if case let .failed(message) = droplet.serverStates[server.id]?.connection {
             return "\(address)\n\(message)"
         }

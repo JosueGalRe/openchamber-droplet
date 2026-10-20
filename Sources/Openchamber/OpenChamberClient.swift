@@ -30,12 +30,28 @@ struct ChamberServer: Equatable, Sendable, Identifiable {
 
     let id: String
     let label: String
-    let baseURL: URL
+    /// Direct addresses, tried in order: Desktop's API address, then its UI one.
+    let directURLs: [URL]
+    /// The relay transport, for when no direct address answers.
+    let relay: RelayConfig?
     let token: String
     /// Headers OpenChamber Desktop sends to this host, for example an access proxy's.
     let headers: [String: String]
 
     var isLocal: Bool { id == Self.localID }
+}
+
+/// How one connection reaches its server.
+enum Route: Sendable {
+    case direct(URL)
+    case relay(RelayTunnel)
+
+    var description: String {
+        switch self {
+        case let .direct(url): return url.origin
+        case .relay: return "Through OpenChamber's relay"
+        }
+    }
 }
 
 /// OpenChamber Desktop's own list of servers and tokens.
@@ -64,23 +80,29 @@ enum DesktopServers {
             servers.append(ChamberServer(
                 id: ChamberServer.localID,
                 label: "This Mac",
-                baseURL: URL(string: "http://127.0.0.1:\(port)")!,
+                directURLs: [URL(string: "http://127.0.0.1:\(port)")!],
+                relay: nil,
                 token: token,
                 headers: [:]
             ))
         }
 
         for host in root["desktopHosts"] as? [[String: Any]] ?? [] {
-            // Relay-only hosts (`relay://…`) speak an encrypted relay protocol
-            // this droplet does not implement; only direct HTTP hosts are used.
             guard let id = host["id"] as? String,
-                  let token = host["clientToken"] as? String, !token.isEmpty,
-                  let address = host["apiUrl"] as? String ?? host["url"] as? String,
-                  let url = URL(string: address), url.scheme == "http" || url.scheme == "https" else { continue }
+                  let token = host["clientToken"] as? String, !token.isEmpty else { continue }
+            var direct: [URL] = []
+            for address in [host["apiUrl"], host["url"]].compactMap({ $0 as? String }) {
+                guard let url = URL(string: address), url.scheme == "http" || url.scheme == "https",
+                      !direct.contains(url) else { continue }
+                direct.append(url)
+            }
+            let relay = (host["relay"] as? [String: Any]).flatMap(RelayConfig.init)
+            guard !direct.isEmpty || relay != nil else { continue }
             servers.append(ChamberServer(
                 id: id,
-                label: host["label"] as? String ?? url.host() ?? address,
-                baseURL: url,
+                label: host["label"] as? String ?? direct.first?.host() ?? id,
+                directURLs: direct,
+                relay: relay,
                 token: token,
                 headers: host["requestHeaders"] as? [String: String] ?? [:]
             ))
@@ -118,10 +140,12 @@ enum EventFrame: Sendable {
 
 actor OpenChamberClient {
     nonisolated let server: ChamberServer
+    nonisolated let route: Route
     private let session: URLSession
 
-    init(server: ChamberServer) {
+    init(server: ChamberServer, route: Route) {
         self.server = server
+        self.route = route
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
         configuration.waitsForConnectivity = false
@@ -211,17 +235,42 @@ actor OpenChamberClient {
     func events(after lastEventID: String?) async throws -> AsyncThrowingStream<EventFrame, Error> {
         guard let minted = try await json("POST", "auth/url-token") as? [String: Any],
               let urlToken = minted["token"] as? String else { throw OpenChamberError.invalidResponse }
-
-        var components = URLComponents(url: server.baseURL.appending(path: "api/global/event/ws"), resolvingAgainstBaseURL: false)!
-        components.scheme = server.baseURL.scheme == "https" ? "wss" : "ws"
-        components.queryItems = [URLQueryItem(name: "oc_url_token", value: urlToken)]
+        let query = [URLQueryItem(name: "oc_url_token", value: urlToken)]
             + (lastEventID.map { [URLQueryItem(name: "lastEventId", value: $0)] } ?? [])
+
+        let baseURL: URL
+        switch route {
+        case let .relay(tunnel):
+            // The host opens the socket on its own loopback, with its own origin.
+            var components = URLComponents()
+            components.queryItems = query
+            let messages = try await tunnel.webSocket(path: "/api/global/event/ws", query: components.percentEncodedQuery ?? "")
+            return AsyncThrowingStream { continuation in
+                let reader = Task {
+                    do {
+                        for try await text in messages {
+                            if let frame = Self.frame(from: text) { continuation.yield(frame) }
+                        }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+                continuation.onTermination = { _ in reader.cancel() }
+            }
+        case let .direct(url):
+            baseURL = url
+        }
+
+        var components = URLComponents(url: baseURL.appending(path: "api/global/event/ws"), resolvingAgainstBaseURL: false)!
+        components.scheme = baseURL.scheme == "https" ? "wss" : "ws"
+        components.queryItems = query
 
         // The upgrade is refused without an Origin matching the server's own
         // host (`isRequestOriginAllowed`), and URLSession sends none.
         var request = URLRequest(url: components.url!)
         for (name, value) in server.headers { request.setValue(value, forHTTPHeaderField: name) }
-        request.setValue(server.baseURL.origin, forHTTPHeaderField: "Origin")
+        request.setValue(baseURL.origin, forHTTPHeaderField: "Origin")
         let task = session.webSocketTask(with: request)
         // A tool's output rides in its success event; the default 1 MB cap
         // would drop the connection on one large read.
@@ -272,24 +321,40 @@ actor OpenChamberClient {
         directory: String? = nil,
         body: [String: Any]? = nil
     ) async throws -> Any? {
-        var components = URLComponents(url: server.baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
-        if !query.isEmpty { components.queryItems = query }
-        var request = URLRequest(url: components.url!)
-        request.httpMethod = method
-        for (name, value) in server.headers { request.setValue(value, forHTTPHeaderField: name) }
-        request.setValue("Bearer \(server.token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        var headers = [
+            "Authorization": "Bearer \(server.token)",
+            "Accept": "application/json",
+        ]
         if let directory {
             // OpenCode scopes a request to a project through this header, and
             // rejects non-ASCII header values unless they are percent-encoded.
-            request.setValue(directory.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? directory, forHTTPHeaderField: "x-opencode-directory")
+            headers["x-opencode-directory"] = directory.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? directory
         }
-        if let body {
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let payload = try body.map { try JSONSerialization.data(withJSONObject: $0) }
+        if payload != nil { headers["Content-Type"] = "application/json" }
+
+        let status: Int
+        let data: Data
+        switch route {
+        case let .relay(tunnel):
+            var components = URLComponents()
+            if !query.isEmpty { components.queryItems = query }
+            (status, data) = try await tunnel.request(
+                method: method, path: "/" + path, query: components.percentEncodedQuery ?? "", headers: headers, body: payload
+            )
+        case let .direct(baseURL):
+            var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
+            if !query.isEmpty { components.queryItems = query }
+            var request = URLRequest(url: components.url!)
+            request.httpMethod = method
+            for (name, value) in server.headers.merging(headers, uniquingKeysWith: { $1 }) {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+            request.httpBody = payload
+            let (body, response) = try await session.data(for: request)
+            guard let code = (response as? HTTPURLResponse)?.statusCode else { throw OpenChamberError.invalidResponse }
+            (status, data) = (code, body)
         }
-        let (data, response) = try await session.data(for: request)
-        guard let status = (response as? HTTPURLResponse)?.statusCode else { throw OpenChamberError.invalidResponse }
         if status == 401 { throw OpenChamberError.unauthorized }
         guard (200..<300).contains(status) else { throw OpenChamberError.http(status) }
         return data.isEmpty ? nil : try JSONSerialization.jsonObject(with: data)

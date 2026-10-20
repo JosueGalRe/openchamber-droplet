@@ -9,21 +9,31 @@ import Testing
         "desktopLocalClientToken": "oc_client_local",
         "desktopHosts": [
             ["id": "h1", "label": "devbox", "url": "http://192.168.1.30:4097/", "apiUrl": "http://10.0.0.5:4097/",
-             "clientToken": "oc_client_remote", "requestHeaders": ["CF-Access-Client-Id": "abc"]],
-            ["id": "h2", "label": "Relay only", "url": "relay://server", "clientToken": "oc_client_relay"],
+             "clientToken": "oc_client_remote", "requestHeaders": ["CF-Access-Client-Id": "abc"], "relay": relay],
+            ["id": "h2", "label": "Relay only", "url": "relay://server", "clientToken": "oc_client_relay", "relay": relay],
             ["id": "h3", "label": "No token", "url": "http://10.0.0.9:4097/"],
+            ["id": "h4", "label": "Unknown relay", "url": "relay://other", "clientToken": "oc_client_other"],
         ],
     ]
     let servers = DesktopServers.parse(try JSONSerialization.data(withJSONObject: settings))
 
-    #expect(servers.map(\.id) == [ChamberServer.localID, "h1"])
-    #expect(servers[0].baseURL.absoluteString == "http://127.0.0.1:4097")
+    #expect(servers.map(\.id) == [ChamberServer.localID, "h1", "h2"])
+    #expect(servers[0].directURLs.map(\.absoluteString) == ["http://127.0.0.1:4097"])
     #expect(servers[0].token == "oc_client_local")
-    // Desktop talks to a host's API at `apiUrl` when it has one.
-    #expect(servers[1].baseURL.absoluteString == "http://10.0.0.5:4097/")
+    // Desktop talks to a host's API at `apiUrl` first, then its UI address.
+    #expect(servers[1].directURLs.map(\.absoluteString) == ["http://10.0.0.5:4097/", "http://192.168.1.30:4097/"])
     #expect(servers[1].headers == ["CF-Access-Client-Id": "abc"])
-    #expect(servers[1].baseURL.origin == "http://10.0.0.5:4097")
+    #expect(servers[1].relay?.serverID == "server-id")
+    #expect(servers[1].relay?.hostKeyX.count == 32)
+    #expect(servers[2].directURLs.isEmpty)
+    #expect(servers[2].relay != nil)
 }
+
+private var relay: [String: Any] { [
+    "relayUrl": "wss://relay.openchamber.dev/ws",
+    "serverId": "server-id",
+    "hostEncPubJwk": ["kty": "EC", "crv": "P-256", "x": "05NPClQHxhhgK1OW8-nGzH7aAZwKDj67qfiHfpaDKj0", "y": "AMSZL2D9Zl81UQoLaPK4qhWQZ6iXexoerTcdnZdOlXc"],
+] }
 
 @Test func unreadableSettingsMeanNoServers() {
     #expect(DesktopServers.parse(Data("not json".utf8)).isEmpty)

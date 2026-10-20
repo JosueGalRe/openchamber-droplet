@@ -39,6 +39,8 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         var connection: Connection = .connecting
         var usage: [ProviderQuota] = []
         var usageFetchedAt: Date?
+        /// How the current connection reaches the server, for settings.
+        var route: String?
     }
 
     static let sessionsWidgetID: ShelfWidgetID = "sessions"
@@ -153,27 +155,34 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     // MARK: Feeds
 
     /// Connects, seeds, streams, and starts over when the stream drops. Waits
-    /// on `/health` while the server is down, which costs no token.
+    /// on `/health` while every direct address is down, which costs no token,
+    /// and falls back to the relay when the server has one.
     private func runFeed(_ initial: ChamberServer) async {
         var server = initial
         var backoff: TimeInterval = 2
         var lastEventID: String?
         while !Task.isCancelled {
-            guard await OpenChamberClient.isReachable(server.baseURL) else {
-                setConnection(.offline, for: server.id)
-                try? await Task.sleep(for: .seconds(15))
-                continue
-            }
-            let client = OpenChamberClient(server: server)
-            clients[server.id] = client
+            var wait = backoff
             do {
+                guard let route = try await openRoute(to: server) else {
+                    setConnection(.offline, for: server.id)
+                    try? await Task.sleep(for: .seconds(15))
+                    continue
+                }
+                defer { if case let .relay(tunnel) = route { Task { await tunnel.close() } } }
+                let client = OpenChamberClient(server: server, route: route)
+                clients[server.id] = client
+                serverStates[server.id]?.route = route.description
                 setConnection(.connecting, for: server.id)
                 apply(try await client.seed(), from: server.id)
                 apply(.sessionsListed(try await client.recentSessions()), from: server.id)
                 let stream = try await client.events(after: lastEventID)
                 setConnection(.live, for: server.id)
                 backoff = 2
+                wait = 2
                 refreshUsage(on: server.id, ifOlderThan: 60)
+                // shortcut: a feed that fell back to the relay stays on it until
+                // the stream drops; it does not probe for the direct address coming back.
                 for try await frame in stream {
                     switch frame {
                     case let .ready(replayReset):
@@ -190,16 +199,38 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                     continue
                 }
                 setConnection(.failed(OpenChamberError.unauthorized.localizedDescription), for: server.id)
-                backoff = 60
+                wait = 60
+            } catch let error as RelayError where error.isDuplicateClient {
+                // The relay gave this device's leg to another client. Taking it
+                // back at once would drop that one in turn, so stand aside.
+                setConnection(.failed(error.localizedDescription), for: server.id)
+                wait = 600
             } catch is CancellationError {
                 return
             } catch {
                 setConnection(.failed(error.localizedDescription), for: server.id)
                 host?.log.error("\(server.label): event stream ended: \(error.localizedDescription)")
             }
-            try? await Task.sleep(for: .seconds(backoff))
+            try? await Task.sleep(for: .seconds(wait))
             backoff = min(backoff * 2, 60)
         }
+    }
+
+    /// The first direct address that answers `/health`, else a relay tunnel
+    /// with its handshake done, else nil when the server is unreachable.
+    private func openRoute(to server: ChamberServer) async throws -> Route? {
+        for url in server.directURLs where await OpenChamberClient.isReachable(url) {
+            return .direct(url)
+        }
+        guard let relay = server.relay else { return nil }
+        let tunnel = RelayTunnel(config: relay)
+        do {
+            try await tunnel.connect(appVersion: "droplet-\(host?.environment.appVersion ?? "unknown")")
+        } catch {
+            await tunnel.close()
+            throw error
+        }
+        return .relay(tunnel)
     }
 
     private func setConnection(_ connection: Connection, for serverID: String) {
@@ -564,8 +595,8 @@ private extension OpenchamberDroplet {
     /// What the harness shows: no network, two servers, one of everything.
     func loadSample() {
         let now = Date()
-        let mac = ChamberServer(id: ChamberServer.localID, label: "This Mac", baseURL: URL(string: "http://127.0.0.1:4097")!, token: "", headers: [:])
-        let remote = ChamberServer(id: "remote", label: "devbox", baseURL: URL(string: "http://192.168.1.30:4097")!, token: "", headers: [:])
+        let mac = ChamberServer(id: ChamberServer.localID, label: "This Mac", directURLs: [URL(string: "http://127.0.0.1:4097")!], relay: nil, token: "", headers: [:])
+        let remote = ChamberServer(id: "remote", label: "devbox", directURLs: [URL(string: "http://192.168.1.30:4097")!], relay: nil, token: "", headers: [:])
         servers = [mac, remote]
 
         var local = ServerState(connection: .live)
