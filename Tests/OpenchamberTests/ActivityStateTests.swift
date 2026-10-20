@@ -175,3 +175,25 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     state.apply(.executionStarted(sessionID: "s1", at: t0.addingTimeInterval(60)))
     #expect(state.activity["s1"]?.steps == 0)
 }
+
+@Test func renamesAndModelOrAgentSwitchesReachTheSession() {
+    var state = state(after: [
+        wire("session.created", ["sessionID": "s1", "title": "", "location": ["directory": "/r/app"], "agent": "build",
+                                 "model": ["id": "claude-sonnet-4.5", "providerID": "kiro"]]),
+        wire("session.renamed", ["sessionID": "s1", "title": "Fix the relay"]),
+        wire("session.agent.selected", ["sessionID": "s1", "agent": "plan"]),
+        wire("session.model.selected", ["sessionID": "s1", "model": ["id": "gpt-5.5", "providerID": "openai"]]),
+    ])
+    #expect(state.sessions["s1"] == SessionInfo(id: "s1", title: "Fix the relay", directory: "/r/app", parentID: nil,
+                                               providerID: "openai", modelID: "gpt-5.5", agent: "plan"))
+
+    // A rename for a session never listed waits for its lookup instead of inventing a record.
+    state.apply(ActivityWire.event(from: wire("session.renamed", ["sessionID": "ghost", "title": "?"]), now: t0)!)
+    #expect(state.sessions["ghost"] == nil)
+}
+
+@Test func theRunnerNamesModelProfileAndServer() {
+    let session = SessionInfo(id: "s1", title: "T", directory: "/r", parentID: nil, providerID: "kiro", modelID: "kiro/claude-sonnet-4.5", agent: "build")
+    #expect(Formatting.runner(of: session, server: "devbox") == "claude-sonnet-4.5 · Build · devbox")
+    #expect(Formatting.runner(of: SessionInfo(id: "s2", title: "T", directory: "/r", parentID: nil, providerID: "claude-code"), server: nil) == "Claude")
+}

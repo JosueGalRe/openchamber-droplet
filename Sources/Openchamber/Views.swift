@@ -29,6 +29,15 @@ enum Formatting {
         return "\(minutes)m"
     }
 
+    /// Who is doing the work: `claude-sonnet-4.5 · Build · devbox`. The
+    /// provider's name stands in until the session's model is known.
+    static func runner(of session: SessionInfo?, server: String?) -> String {
+        let model = session?.modelID.map { ($0 as NSString).lastPathComponent }
+            ?? ProviderStyle.displayName(session?.providerID ?? "")
+        let agent = session?.agent.map { $0.prefix(1).uppercased() + $0.dropFirst() }
+        return [model, agent, server].compactMap { $0 }.joined(separator: " · ")
+    }
+
     /// `5-hour limit`, `Weekly · all models`, `Weekly · Fable`.
     static func windowLabel(_ window: QuotaWindow, in provider: ProviderQuota) -> String {
         let base: String
@@ -132,6 +141,12 @@ struct CompactLabel: View {
 
 // MARK: - Widget
 
+extension ShelfWidgetContext {
+    /// Droppy marks every widget in a shared row compact, however wide its
+    /// share of the row is; a share as wide as a solo widget gets the full layout.
+    var isNarrow: Bool { isCompact && availableSize.width < 360 }
+}
+
 /// The one widget: a Sessions page and a Usage page. The header says how
 /// things stand; the switch at its end changes the page.
 struct OpenchamberWidget: View {
@@ -162,8 +177,8 @@ struct OpenchamberWidget: View {
         let busy = droplet.state.busySessionIDs.count
         switch droplet.phase {
         case let .waiting(count):
-            let running = busy > 0 && !context.isCompact ? " · \(busy) running" : ""
-            return HeaderStatus(symbol: "hand.raised.fill", title: (context.isCompact ? "Waiting" : "\(count) waiting") + running, tint: .orange)
+            let running = busy > 0 && !context.isNarrow ? " · \(busy) running" : ""
+            return HeaderStatus(symbol: "hand.raised.fill", title: (context.isNarrow ? "Waiting" : "\(count) waiting") + running, tint: .orange)
         case .working:
             return HeaderStatus(symbol: "play.fill", title: busy == 1 ? "Working" : "\(busy) running")
         case .retrying:
@@ -247,15 +262,15 @@ private struct SessionsPage: View {
     var body: some View {
         let busy = state.busySessionIDs
         if let permission = state.permissions.first {
-            ApprovalView(droplet: droplet, permission: permission, compact: context.isCompact)
-            if !context.isCompact, let other = busy.last(where: { $0 != permission.sessionID }) {
+            ApprovalView(droplet: droplet, permission: permission, compact: context.isNarrow)
+            if !context.isNarrow, let other = busy.last(where: { $0 != permission.sessionID }) {
                 Spacer(minLength: DroppySpacing.sm)
                 SessionLine(droplet: droplet, sessionID: other, oneLine: true)
             }
         } else if let form = state.forms.first {
-            FormView(droplet: droplet, form: form, compact: context.isCompact)
-        } else if busy.count == 1 || (context.isCompact && !busy.isEmpty), let id = primary {
-            SessionHero(droplet: droplet, sessionID: id, compact: context.isCompact)
+            FormView(droplet: droplet, form: form, compact: context.isNarrow)
+        } else if busy.count == 1 || (context.isNarrow && !busy.isEmpty), let id = primary {
+            SessionHero(droplet: droplet, sessionID: id, compact: context.isNarrow)
         } else if busy.count > 1 {
             VStack(alignment: .leading, spacing: DroppySpacing.smd) {
                 ForEach(busy.suffix(3).reversed(), id: \.self) { id in
@@ -269,7 +284,7 @@ private struct SessionsPage: View {
                 }
             }
         } else if case let .failed(id) = droplet.phase {
-            SessionHero(droplet: droplet, sessionID: id, compact: context.isCompact)
+            SessionHero(droplet: droplet, sessionID: id, compact: context.isNarrow)
         } else {
             ServerTiles(droplet: droplet, context: context)
         }
@@ -348,10 +363,11 @@ private struct SessionHero: View {
                 if compact {
                     ElapsedText(since: activity.busySince, size: 13)
                 } else {
-                    Text([ProviderStyle.displayName(provider), droplet.serverLabel(forSession: sessionID)].compactMap { $0 }.joined(separator: " · "))
+                    Text(Formatting.runner(of: session, server: droplet.serverLabel(forSession: sessionID)))
                         .font(.system(size: 12))
                         .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                         .lineLimit(1)
+                        .truncationMode(.head)
                 }
             }
         }
@@ -559,11 +575,11 @@ private struct ServerTiles: View {
     let context: ShelfWidgetContext
 
     var body: some View {
-        HStack(spacing: context.isCompact ? DroppySpacing.md : DroppySpacing.xl) {
-            ForEach(droplet.servers.prefix(context.isCompact ? 2 : 4)) { server in
+        HStack(spacing: context.isNarrow ? DroppySpacing.md : DroppySpacing.xl) {
+            ForEach(droplet.servers.prefix(context.isNarrow ? 2 : 4)) { server in
                 VStack(spacing: DroppySpacing.xsm) {
-                    ChamberGlyph(motion: .still, size: context.isCompact ? 22 : 28)
-                        .frame(width: context.isCompact ? 46 : 58, height: context.isCompact ? 46 : 58)
+                    ChamberGlyph(motion: .still, size: context.isNarrow ? 22 : 28)
+                        .frame(width: context.isNarrow ? 46 : 58, height: context.isNarrow ? 46 : 58)
                         .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.ml, style: .continuous))
                     Text(server.label)
                         .font(.system(size: 12, weight: .semibold))
@@ -663,7 +679,7 @@ struct UsageRings: View {
 
     var body: some View {
         let all = droplet.usage
-        let layout = RingLayout(count: all.count, width: context.availableSize.width, compact: context.isCompact)
+        let layout = RingLayout(count: all.count, width: context.availableSize.width, compact: context.isNarrow)
         Group {
             if all.isEmpty {
                 WidgetMessage(text: droplet.connection == .live ? "No plan usage from OpenChamber yet." : "OpenChamber isn't reachable.")
@@ -844,7 +860,7 @@ private struct UsageBar: View {
 enum ProviderStyle {
     private static var images: [String: NSImage] = [:]
 
-    static func key(_ provider: String) -> String? {
+    nonisolated static func key(_ provider: String) -> String? {
         let id = provider.lowercased()
         if id.contains("claude") || id.contains("anthropic") { return "claude" }
         if id.contains("codex") || id.contains("openai") || id.contains("chatgpt") { return "codex" }
@@ -855,7 +871,7 @@ enum ProviderStyle {
     }
 
     /// What Agents calls the agent: the product, not the provider id.
-    static func displayName(_ provider: String) -> String {
+    nonisolated static func displayName(_ provider: String) -> String {
         let id = provider.lowercased()
         switch key(provider) {
         case "claude": return "Claude"

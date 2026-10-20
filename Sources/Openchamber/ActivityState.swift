@@ -18,6 +18,8 @@ struct SessionInfo: Equatable, Sendable {
     /// The session's model, as OpenCode records it: `anthropic`, `openai`, `opencode`, …
     var providerID: String? = nil
     var modelID: String? = nil
+    /// The agent profile the session runs as: `build`, `plan`, or one of your own.
+    var agent: String? = nil
 
     /// The folder name, which is how OpenChamber's sidebar names a project.
     var project: String { (directory as NSString).lastPathComponent }
@@ -157,6 +159,9 @@ enum ActivityEvent: Equatable, Sendable {
     case toolCalled(sessionID: String, callID: String, name: String?, target: String?)
     case toolFinished(sessionID: String, callID: String, succeeded: Bool)
     case textEnded(sessionID: String, text: String)
+    /// `session.created`, `session.renamed`, `session.agent.selected` and
+    /// `session.model.selected`: whatever changed, nil for what did not.
+    case sessionChanged(SessionChange)
     case permissionAsked(PendingPermission)
     case permissionSettled(sessionID: String, requestID: String)
     case formCreated(PendingForm)
@@ -165,6 +170,16 @@ enum ActivityEvent: Equatable, Sendable {
     /// session whose execution events were missed while disconnected.
     case statusChanged(sessionID: String, busy: Bool, at: Date)
     case sessionDeleted(String)
+}
+
+struct SessionChange: Equatable, Sendable {
+    let sessionID: String
+    var title: String?
+    var directory: String?
+    var parentID: String?
+    var providerID: String?
+    var modelID: String?
+    var agent: String?
 }
 
 /// The one thing the notch says, derived from the whole state.
@@ -306,6 +321,19 @@ struct ActivityState: Equatable, Sendable {
             guard let index = activity[id]?.calls.firstIndex(where: { $0.id == callID }) else { return }
             activity[id]?.calls[index].mark = succeeded ? .succeeded : .failed
 
+        case let .sessionChanged(change):
+            var info = sessions[change.sessionID]
+                ?? SessionInfo(id: change.sessionID, title: "Untitled session", directory: change.directory ?? "", parentID: change.parentID)
+            if let title = change.title, !title.isEmpty { info.title = title }
+            if let directory = change.directory { info.directory = directory }
+            if let parentID = change.parentID { info.parentID = parentID }
+            if let providerID = change.providerID { info.providerID = providerID }
+            if let modelID = change.modelID { info.modelID = modelID }
+            if let agent = change.agent { info.agent = agent }
+            // Only a session we know, or one being created, gets a record:
+            // a rename of a session we never listed waits for the lookup.
+            if sessions[change.sessionID] != nil || change.directory != nil { sessions[change.sessionID] = info }
+
         case let .textEnded(id, text):
             activity[id, default: SessionActivity()].lastText = text
 
@@ -400,6 +428,18 @@ enum ActivityWire {
             guard let sessionID, let callID = data["id"] as? String else { return nil }
             let input = data["input"] as? [String: Any] ?? [:]
             return .toolCalled(sessionID: sessionID, callID: callID, name: data["name"] as? String, target: target(of: input))
+        case "session.created", "session.renamed", "session.agent.selected", "session.model.selected":
+            guard let sessionID else { return nil }
+            let model = data["model"] as? [String: Any]
+            return .sessionChanged(SessionChange(
+                sessionID: sessionID,
+                title: data["title"] as? String,
+                directory: type == "session.created" ? ((data["location"] as? [String: Any])?["directory"] as? String ?? directory) : nil,
+                parentID: data["parentID"] as? String,
+                providerID: model?["providerID"] as? String,
+                modelID: model?["id"] as? String,
+                agent: data["agent"] as? String
+            ))
         case "session.text.ended":
             guard let sessionID, let text = (data["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty else { return nil }
@@ -458,7 +498,8 @@ enum ActivityWire {
             directory: directory,
             parentID: record["parentID"] as? String,
             providerID: model?["providerID"] as? String,
-            modelID: model?["id"] as? String
+            modelID: model?["id"] as? String,
+            agent: record["agent"] as? String
         )
     }
 
