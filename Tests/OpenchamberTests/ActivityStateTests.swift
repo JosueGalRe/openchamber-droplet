@@ -197,3 +197,9 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(Formatting.runner(of: session, server: "devbox") == "claude-sonnet-4.5 · Build · devbox")
     #expect(Formatting.runner(of: SessionInfo(id: "s2", title: "T", directory: "/r", parentID: nil, providerID: "claude-code"), server: nil) == "Claude")
 }
+
+@Test func shellBlocksReadAsTheCommandInside() {
+    #expect(Narration.command("for i in 1 2 3; do swift test; done") == "swift test")
+    #expect(Narration.command("if [ -f x ]; then make build; fi") == "make build")
+    #expect(Narration.command("while true; do sleep 5; done") == "sleep 5")
+}

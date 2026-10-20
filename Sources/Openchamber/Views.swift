@@ -102,6 +102,7 @@ struct CompactLabel: View {
                 Text(verbatim: text)
                     .font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .medium, design: .rounded))
                     .monospacedDigit()
+                    .minimumScaleFactor(0.75)
             }
             .foregroundStyle(color)
             .lineLimit(1)
@@ -130,7 +131,7 @@ struct CompactLabel: View {
         case .idle: return (nil, "", primary)
         case let .working(sessions, since):
             let elapsed = Formatting.elapsed(now.timeIntervalSince(since))
-            return (nil, sessions > 1 ? "\(sessions) · \(elapsed)" : elapsed, primary)
+            return (nil, sessions > 1 ? "\(sessions)·\(elapsed)" : elapsed, primary)
         case let .retrying(_, _, at): return ("arrow.clockwise", Formatting.elapsed(at.timeIntervalSince(now)), primary)
         case .finishing: return ("checkmark.circle.fill", "", .green)
         case let .waiting(count): return ("hand.raised.fill", "\(count)", .orange)
@@ -256,6 +257,8 @@ private struct PageSwitch: View {
 private struct SessionsPage: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let context: ShelfWidgetContext
+    /// The session opened from the list; the others fold to a line each.
+    @State private var expanded: String?
 
     private var state: ActivityState { droplet.state }
 
@@ -265,7 +268,7 @@ private struct SessionsPage: View {
             ApprovalView(droplet: droplet, permission: permission, compact: context.isNarrow)
             if !context.isNarrow, let other = busy.last(where: { $0 != permission.sessionID }) {
                 Spacer(minLength: DroppySpacing.sm)
-                SessionLine(droplet: droplet, sessionID: other, oneLine: true)
+                SessionLine(droplet: droplet, sessionID: other, oneLine: true) { droplet.openSession(other) }
             }
         } else if let form = state.forms.first {
             FormView(droplet: droplet, form: form, compact: context.isNarrow)
@@ -273,15 +276,29 @@ private struct SessionsPage: View {
             SessionHero(droplet: droplet, sessionID: busy[0], compact: context.isNarrow)
         } else if busy.count > 1 {
             VStack(alignment: .leading, spacing: DroppySpacing.smd) {
-                ForEach(busy.suffix(3).reversed(), id: \.self) { id in
-                    SessionLine(droplet: droplet, sessionID: id, oneLine: false, compact: context.isNarrow)
+                if let open = expanded, busy.contains(open) {
+                    let others = Array(busy.filter { $0 != open }.suffix(2).reversed())
+                    SessionHero(droplet: droplet, sessionID: open, compact: context.isNarrow,
+                                lastTextLines: others.count > 1 ? 0 : 1) { expanded = nil }
+                        .id(open)
+                        .transition(DroppyTransition.element)
+                    ForEach(others, id: \.self) { id in
+                        SessionLine(droplet: droplet, sessionID: id, oneLine: true) { expanded = id }
+                    }
+                } else {
+                    ForEach(busy.suffix(3).reversed(), id: \.self) { id in
+                        SessionLine(droplet: droplet, sessionID: id, oneLine: false, compact: context.isNarrow) { expanded = id }
+                    }
+                    Spacer(minLength: 0)
+                    if busy.count > 3 {
+                        Text(verbatim: "+\(busy.count - 3) more")
+                            .font(.system(size: 11))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    }
                 }
-                Spacer(minLength: 0)
-                if busy.count > 3 {
-                    Text(verbatim: "+\(busy.count - 3) more")
-                        .font(.system(size: 11))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                }
+            }
+            .onChange(of: busy) { _, ids in
+                if let open = expanded, !ids.contains(open) { expanded = nil }
             }
         } else if case let .failed(id) = droplet.phase {
             SessionHero(droplet: droplet, sessionID: id, compact: context.isNarrow)
@@ -297,6 +314,11 @@ private struct SessionHero: View {
     let droplet: OpenchamberDroplet
     let sessionID: String
     let compact: Bool
+    /// Lines of the assistant's last words; a hero sharing the page gets fewer.
+    var lastTextLines = 2
+    /// Set when the hero was opened from the list: a tap folds it back, and
+    /// OpenChamber opens from its button instead.
+    var collapse: (() -> Void)? = nil
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
@@ -310,9 +332,17 @@ private struct SessionHero: View {
                     .font(.system(size: compact ? 14 : 15, weight: .semibold))
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                     .lineLimit(1)
+                Spacer(minLength: DroppySpacing.md)
                 if !compact {
-                    Spacer(minLength: DroppySpacing.md)
                     ElapsedText(since: activity.busySince, size: 13)
+                }
+                if collapse != nil {
+                    Button { droplet.openSession(sessionID) } label: {
+                        Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold))
+                    }
+                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                    .help("Open in OpenChamber")
+                    .accessibilityLabel("Open in OpenChamber")
                 }
             }
             HStack(spacing: DroppySpacing.sm) {
@@ -330,11 +360,11 @@ private struct SessionHero: View {
 
             Spacer(minLength: DroppySpacing.sm)
 
-            if !compact, let text = activity.lastText {
+            if !compact, lastTextLines > 0, let text = activity.lastText {
                 Text(text)
                     .font(.system(size: 12))
                     .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    .lineLimit(2)
+                    .lineLimit(lastTextLines)
                     .padding(.leading, DroppySpacing.sm)
                     .overlay(alignment: .leading) {
                         Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
@@ -363,7 +393,7 @@ private struct SessionHero: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { droplet.openSession(sessionID) }
+        .onTapGesture { if let collapse { collapse() } else { droplet.openSession(sessionID) } }
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -375,6 +405,7 @@ private struct SessionLine: View {
     let oneLine: Bool
     /// A narrow row keeps the server, which tells the sessions apart, and drops the project.
     var compact = false
+    let tap: () -> Void
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
@@ -409,7 +440,7 @@ private struct SessionLine: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { droplet.openSession(sessionID) }
+        .onTapGesture(perform: tap)
         .accessibilityAddTraits(.isButton)
     }
 }

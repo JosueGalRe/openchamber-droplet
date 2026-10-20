@@ -106,7 +106,10 @@ struct Narration: Equatable, Sendable {
     /// that is not setup, as its program and subcommand, without flags,
     /// redirections, pipes or heredocs.
     static func command(_ line: String) -> String? {
-        let setup: Set = ["cd", "export", "source", ".", "set", "pushd", "env", "time", "sudo"]
+        let setup: Set = ["cd", "export", "source", ".", "set", "pushd", "env", "time", "sudo",
+                          "for", "case", "select", "done", "fi", "esac", "true", "false", ":", "[", "[["]
+        // `for i in …; do swift test; done`: the words that open a block are not the command.
+        let keywords: Set = ["do", "then", "else", "elif", "if", "while", "until", "!", "{"]
         let parts = line
             .components(separatedBy: ";")
             .flatMap { $0.components(separatedBy: "&&") }
@@ -115,6 +118,7 @@ struct Narration: Equatable, Sendable {
             var words: [String] = []
             for token in part.split(separator: " ").map(String.init) {
                 if words.isEmpty, token.contains("="), !token.hasPrefix("-") { continue } // FOO=bar cmd
+                if words.isEmpty, keywords.contains(token) { continue }
                 if token.hasPrefix("-") || token.contains(where: { "|<>&$(`\"'".contains($0) }) { break }
                 words.append(words.isEmpty ? (token as NSString).lastPathComponent : token)
                 if words.count == 2 { break }
