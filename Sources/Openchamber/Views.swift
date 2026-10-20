@@ -473,12 +473,15 @@ private struct SessionProgress: View {
                 }
             }
             if !compact, let text = activity.lastText {
+                // A fixed width, so the title truncates rather than the message,
+                // which grows down to four lines.
                 Text(text)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                     .lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 150, alignment: .leading)
                     .padding(DroppySpacing.md)
-                    .frame(maxWidth: 180, alignment: .leading)
                     .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.large, style: .continuous))
             }
         }
