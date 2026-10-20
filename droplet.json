@@ -2,17 +2,28 @@
   "id": "openchamber",
   "name": "OpenChamber",
   "version": "1.0.0",
-  "summary": "One line about OpenChamber",
-  "description": "A longer description, in plain paragraphs.",
+  "summary": "Your OpenChamber sessions, approvals and usage in the notch",
+  "description": "OpenChamber puts the coding sessions you run in OpenChamber beside the notch: what is working, for how long, and which tool each session is in.\n\nWhen a session asks for permission, a card appears on the notch with the exact command, and you allow it once or reject it without leaving what you are doing. The shelf widget keeps every pending request, with Always for the ones you trust. A second widget shows each plan's usage windows from OpenChamber's Usage page, and warns you as one passes 80% and 95%.\n\nPair this Mac once from the droplet's settings with a link from OpenChamber. The device token stays in your Keychain, and the droplet only talks to the OpenChamber server on this Mac.",
   "category": "Productivity",
   "kit": {
     "abi": 1,
-    "minAPI": "1.6.0"
+    "minAPI": "1.9.0"
   },
   "minAppVersion": "15.3.0",
-  "capabilities": [],
+  "capabilities": [
+    "network-client",
+    "hud",
+    "global-shortcuts",
+    "lock-screen",
+    "menu-bar"
+  ],
   "surfaces": [
-    "shelf-widget"
+    "shelf-widget",
+    "live-activity",
+    "settings-pane",
+    "hud",
+    "lock-screen-status",
+    "menu-bar-extra"
   ],
   "icon": "Openchamber.icon",
   "creator": {
@@ -27,5 +38,12 @@
     "license": "MIT"
   },
   "screenshots": [],
-  "keywords": []
+  "keywords": [
+    "openchamber",
+    "opencode",
+    "agents",
+    "coding",
+    "permissions",
+    "usage"
+  ]
 }
