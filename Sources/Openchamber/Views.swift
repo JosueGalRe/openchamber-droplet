@@ -169,8 +169,14 @@ struct OpenchamberWidget: View {
 
     private var buttonSize: CGFloat { context.isCompact ? 24 : 28 }
 
-    /// The session the page follows: the one that started last.
-    private var primarySessionID: String? { state.busySessionIDs.last }
+    /// The session the page follows: one in a tool call right now, else one
+    /// that has done something, else the one that started last.
+    private var primarySessionID: String? {
+        let busy = state.busySessionIDs
+        return busy.last { state.activity[$0]?.calls.last?.mark == .running }
+            ?? busy.last { state.activity[$0]?.calls.isEmpty == false }
+            ?? busy.last
+    }
 
     @ViewBuilder private var full: some View {
         if let permission = state.permissions.first {
@@ -181,7 +187,7 @@ struct OpenchamberWidget: View {
             if let id = primarySessionID { SessionRow(droplet: droplet, sessionID: id) }
         } else if let id = primarySessionID {
             SessionProgress(droplet: droplet, sessionID: id, compact: false)
-            let others = state.busySessionIDs.dropLast()
+            let others = state.busySessionIDs.filter { $0 != id }
             if !others.isEmpty {
                 Text(verbatim: "+\(others.count) more · " + others.compactMap { state.sessions[$0]?.title }.joined(separator: ", "))
                     .font(.system(size: 11))
