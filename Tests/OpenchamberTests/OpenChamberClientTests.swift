@@ -2,30 +2,43 @@ import Foundation
 import Testing
 @testable import Openchamber
 
-private func link(_ payload: [String: Any]) -> String {
-    let data = try! JSONSerialization.data(withJSONObject: payload)
-    let base64url = data.base64EncodedString()
-        .replacingOccurrences(of: "+", with: "-")
-        .replacingOccurrences(of: "/", with: "_")
-        .replacingOccurrences(of: "=", with: "")
-    return "openchamber://connect?v=2&p=\(base64url)"
+@Test func desktopSettingsYieldTheLocalServerAndDirectHostsOnly() throws {
+    let settings: [String: Any] = [
+        "desktopUiPassword": "not-for-the-droplet",
+        "desktopLocalPort": 4097,
+        "desktopLocalClientToken": "oc_client_local",
+        "desktopHosts": [
+            ["id": "h1", "label": "devbox", "url": "http://192.168.1.30:4097/", "apiUrl": "http://10.0.0.5:4097/",
+             "clientToken": "oc_client_remote", "requestHeaders": ["CF-Access-Client-Id": "abc"]],
+            ["id": "h2", "label": "Relay only", "url": "relay://server", "clientToken": "oc_client_relay"],
+            ["id": "h3", "label": "No token", "url": "http://10.0.0.9:4097/"],
+        ],
+    ]
+    let servers = DesktopServers.parse(try JSONSerialization.data(withJSONObject: settings))
+
+    #expect(servers.map(\.id) == [ChamberServer.localID, "h1"])
+    #expect(servers[0].baseURL.absoluteString == "http://127.0.0.1:4097")
+    #expect(servers[0].token == "oc_client_local")
+    // Desktop talks to a host's API at `apiUrl` when it has one.
+    #expect(servers[1].baseURL.absoluteString == "http://10.0.0.5:4097/")
+    #expect(servers[1].headers == ["CF-Access-Client-Id": "abc"])
+    #expect(servers[1].baseURL.origin == "http://10.0.0.5:4097")
 }
 
-@Test func aPairingLinkYieldsItsIdAndSecret() throws {
-    let pairing = try OpenChamberClient.pairingPayload(from: link([
-        "v": 2, "pairingId": "pair_abc", "secret": "s3cr3t",
-        "expiresAt": ISO8601DateFormatter().string(from: Date().addingTimeInterval(600)),
-        "candidates": [["type": "lan", "url": "http://192.168.1.20:4097"]],
-    ]))
-    #expect(pairing.id == "pair_abc")
-    #expect(pairing.secret == "s3cr3t")
+@Test func unreadableSettingsMeanNoServers() {
+    #expect(DesktopServers.parse(Data("not json".utf8)).isEmpty)
+    #expect(DesktopServers.load(from: URL(fileURLWithPath: "/nonexistent/settings.json")).isEmpty)
 }
 
-@Test func expiredOrForeignLinksAreRefused() {
-    let expired = link(["pairingId": "pair_abc", "secret": "s", "expiresAt": "2020-01-01T00:00:00.000Z"])
-    #expect(throws: OpenChamberError.self) { try OpenChamberClient.pairingPayload(from: expired) }
-    #expect(throws: OpenChamberError.badPairingLink) { try OpenChamberClient.pairingPayload(from: "https://example.com/?p=abc") }
-    #expect(throws: OpenChamberError.badPairingLink) { try OpenChamberClient.pairingPayload(from: "openchamber://connect?p=not-json") }
+@Test func mergingServersKeepsEachOnesPendingRequests() {
+    var mac = ActivityState()
+    mac.apply(.permissionAsked(PendingPermission(id: "p1", sessionID: "s1", action: "bash", resources: [], directory: nil)))
+    var work = ActivityState()
+    work.apply(.permissionAsked(PendingPermission(id: "p2", sessionID: "w1", action: "edit", resources: [], directory: nil)))
+    // A seed from the work server must not touch the Mac's request.
+    work.apply(.seeded(busy: [], permissions: [], forms: [], at: Date()))
+
+    #expect(ActivityState.merged([mac, work]).permissions.map(\.id) == ["p1"])
 }
 
 @Test func eventFramesKeepTheCursorEvenWhenTheEventIsIgnored() {

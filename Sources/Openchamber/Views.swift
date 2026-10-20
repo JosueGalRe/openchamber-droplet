@@ -118,8 +118,8 @@ struct SessionsWidget: View {
                 }
             }
             switch droplet.connection {
-            case .notPaired:
-                NotPairedMessage(droplet: droplet)
+            case .noServers:
+                NoServersMessage(droplet: droplet)
             case .offline:
                 WidgetMessage(text: "OpenChamber isn't running.")
             case let .failed(message):
@@ -206,12 +206,12 @@ private struct WidgetMessage: View {
     }
 }
 
-private struct NotPairedMessage: View {
+private struct NoServersMessage: View {
     let droplet: OpenchamberDroplet
 
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            WidgetMessage(text: "Pair this Mac with OpenChamber to see your sessions here.")
+            WidgetMessage(text: "OpenChamber Desktop isn't set up on this Mac yet.")
             Button("Open settings") { droplet.openSettings() }
                 .buttonStyle(DroppyQuietButtonStyle(size: .small))
         }
@@ -251,7 +251,7 @@ private struct PermissionTile: View {
                 Text(permission.action)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                Text(session.map { "\($0.project) · \($0.title)" } ?? "")
+                Text([droplet.serverLabel(forSession: permission.sessionID), session?.project, session?.title].compactMap { $0 }.joined(separator: " · "))
                     .font(.system(size: 11))
                     .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                     .lineLimit(1)
@@ -329,7 +329,7 @@ private struct SessionRow: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                     .lineLimit(1)
-                Text(detail(session: session, call: activity.currentCall))
+                Text(detail(server: droplet.serverLabel(forSession: sessionID), session: session, call: activity.currentCall))
                     .font(.system(size: 11))
                     .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                     .lineLimit(1)
@@ -353,11 +353,9 @@ private struct SessionRow: View {
         .accessibilityAddTraits(.isButton)
     }
 
-    private func detail(session: SessionInfo?, call: ToolCall?) -> String {
-        let project = session?.project ?? ""
-        guard let call else { return project }
-        let action = [call.name, call.target].compactMap { $0 }.joined(separator: " ")
-        return project.isEmpty ? action : "\(project) · \(action)"
+    private func detail(server: String?, session: SessionInfo?, call: ToolCall?) -> String {
+        let action = call.map { [$0.name, $0.target].compactMap { $0 }.joined(separator: " ") }
+        return [server, session?.project, action].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -396,8 +394,8 @@ struct UsageWidget: View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             WidgetHeader(title: "Usage") { EmptyView() }
             if droplet.usage.isEmpty {
-                WidgetMessage(text: droplet.connection == .notPaired
-                    ? "Pair this Mac with OpenChamber to see plan usage."
+                WidgetMessage(text: droplet.connection == .noServers
+                    ? "OpenChamber Desktop isn't set up on this Mac yet."
                     : "No plan usage from OpenChamber yet.")
             } else {
                 TimelineView(.periodic(from: .now, by: 60)) { timeline in
@@ -630,45 +628,23 @@ struct MenuBarSummary: View {
 
 struct OpenchamberSettings: View {
     @ObservedObject var droplet: OpenchamberDroplet
-    @State private var server = ""
-    @State private var link = ""
 
     var body: some View {
         DropletSettingsPane {
-            DropletSettingsCard {
-                DropletControlRow(title: "Connection", infoTip: failure) {
-                    DropletValuePill(text: status)
-                }
-                DropletStackedRow(title: "Server", infoTip: "Where OpenChamber listens on this Mac.") {
-                    // Labels hidden: inside the host's grouped Form a field's
-                    // title becomes a second label, and a URL title a link.
-                    TextField("Server", text: $server, prompt: Text(verbatim: "http://127.0.0.1:4097"))
-                        .labelsHidden()
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { droplet.setServer(server) }
-                }
-                if droplet.connection == .notPaired {
-                    DropletStackedRow(
-                        title: "Pairing link",
-                        infoTip: "In OpenChamber: Settings, Remote instances, Add a device, This computer only. Copy the link it creates."
-                    ) {
-                        HStack(spacing: DroppySpacing.sm) {
-                            TextField("Pairing link", text: $link, prompt: Text(verbatim: "openchamber://connect?…"))
-                                .labelsHidden()
-                                .textFieldStyle(.roundedBorder)
-                            Button("Pair") { droplet.pair(with: link) }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(link.isEmpty)
-                        }
-                        if let error = droplet.pairingError {
-                            Text(error)
-                                .font(.system(size: 11))
-                                .foregroundStyle(.red)
+            DropletSettingsSection {
+                settingsSectionHeader("Servers")
+            } content: {
+                DropletSettingsCard {
+                    ForEach(droplet.servers) { server in
+                        DropletControlRow(title: server.label, infoTip: tip(for: server)) {
+                            DropletValuePill(text: status(of: droplet.serverStates[server.id]?.connection ?? .connecting))
                         }
                     }
-                } else {
-                    DropletControlRow(title: "This Mac is paired") {
-                        Button("Forget", role: .destructive) { droplet.forgetDevice() }
+                    DropletControlRow(
+                        title: droplet.servers.isEmpty ? "No servers found" : "From OpenChamber Desktop",
+                        infoTip: "The servers and tokens OpenChamber Desktop already uses, read from ~/.config/openchamber/settings.json. Relay-only hosts are left out."
+                    ) {
+                        Button("Reload") { droplet.reloadServers() }
                             .buttonStyle(.bordered)
                     }
                 }
@@ -691,23 +667,25 @@ struct OpenchamberSettings: View {
                 }
             }
         }
-        .onAppear { server = droplet.serverURL.absoluteString }
     }
 
-    private var status: String {
-        switch droplet.connection {
-        case .notPaired: return "Not paired"
-        case .offline: return "OpenChamber closed"
+    private func status(of connection: OpenchamberDroplet.Connection) -> String {
+        switch connection {
+        case .noServers: return "Not set up"
+        case .offline: return "Unreachable"
         case .connecting: return "Connecting"
         case .live: return "Connected"
         case .failed: return "Reconnecting"
         }
     }
 
-    /// Why the last connection attempt failed, behind the row's (i).
-    private var failure: String? {
-        if case let .failed(message) = droplet.connection { return message }
-        return nil
+    /// The address, and why the last attempt failed, behind the row's (i).
+    private func tip(for server: ChamberServer) -> String {
+        let address = server.baseURL.origin
+        if case let .failed(message) = droplet.serverStates[server.id]?.connection {
+            return "\(address)\n\(message)"
+        }
+        return address
     }
 
     private func preference(_ key: String, value: Bool) -> Binding<Bool> {

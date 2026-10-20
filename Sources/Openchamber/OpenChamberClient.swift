@@ -2,29 +2,90 @@
 //  OpenChamberClient.swift
 //  Openchamber
 //
-//  The OpenChamber server, as this droplet uses it: a paired-device bearer
-//  token for REST, a 60-second URL token for the global event WebSocket, and
-//  OpenCode's own `/api/session/...` routes, which OpenChamber proxies as is.
+//  One OpenChamber server, as this droplet uses it: the bearer token
+//  OpenChamber Desktop already holds for it, a 60-second URL token for the
+//  global event WebSocket, and OpenCode's own `/api/session/...` routes, which
+//  OpenChamber proxies as is.
 //
 
 import Foundation
-import Security
 
 enum OpenChamberError: Error, Equatable, LocalizedError {
     case unauthorized
-    case badPairingLink
-    case pairingRejected(String)
     case http(Int)
     case invalidResponse
 
     var errorDescription: String? {
         switch self {
-        case .unauthorized: return "OpenChamber no longer accepts this device. Pair it again."
-        case .badPairingLink: return "That is not an OpenChamber pairing link."
-        case let .pairingRejected(message): return message
+        case .unauthorized: return "OpenChamber rejected the token OpenChamber Desktop has for this server."
         case let .http(status): return "OpenChamber answered \(status)."
         case .invalidResponse: return "OpenChamber sent something this droplet cannot read."
         }
+    }
+}
+
+/// A server OpenChamber Desktop on this Mac already talks to.
+struct ChamberServer: Equatable, Sendable, Identifiable {
+    static let localID = "local"
+
+    let id: String
+    let label: String
+    let baseURL: URL
+    let token: String
+    /// Headers OpenChamber Desktop sends to this host, for example an access proxy's.
+    let headers: [String: String]
+
+    var isLocal: Bool { id == Self.localID }
+}
+
+/// OpenChamber Desktop's own list of servers and tokens.
+///
+/// shortcut: reads Desktop's private settings file, which is fine for one
+/// person's Mac and would not pass Store review; a Store build would pair each
+/// server instead.
+enum DesktopServers {
+    static var settingsFile: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appending(path: ".config/openchamber/settings.json")
+    }
+
+    static func load(from file: URL = settingsFile) -> [ChamberServer] {
+        guard let data = try? Data(contentsOf: file) else { return [] }
+        return parse(data)
+    }
+
+    /// The file also holds the UI password and other settings: only the
+    /// fields a server needs leave this function.
+    static func parse(_ data: Data) -> [ChamberServer] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        var servers: [ChamberServer] = []
+
+        if let token = root["desktopLocalClientToken"] as? String, !token.isEmpty {
+            let port = (root["desktopLocalPort"] as? NSNumber)?.intValue ?? 4097
+            servers.append(ChamberServer(
+                id: ChamberServer.localID,
+                label: "This Mac",
+                baseURL: URL(string: "http://127.0.0.1:\(port)")!,
+                token: token,
+                headers: [:]
+            ))
+        }
+
+        for host in root["desktopHosts"] as? [[String: Any]] ?? [] {
+            // Relay-only hosts (`relay://…`) speak an encrypted relay protocol
+            // this droplet does not implement; only direct HTTP hosts are used.
+            guard let id = host["id"] as? String,
+                  let token = host["clientToken"] as? String, !token.isEmpty,
+                  let address = host["apiUrl"] as? String ?? host["url"] as? String,
+                  let url = URL(string: address), url.scheme == "http" || url.scheme == "https" else { continue }
+            servers.append(ChamberServer(
+                id: id,
+                label: host["label"] as? String ?? url.host() ?? address,
+                baseURL: url,
+                token: token,
+                headers: host["requestHeaders"] as? [String: String] ?? [:]
+            ))
+        }
+        return servers
     }
 }
 
@@ -56,23 +117,19 @@ enum EventFrame: Sendable {
 }
 
 actor OpenChamberClient {
-    nonisolated let baseURL: URL
-    private let token: String
+    nonisolated let server: ChamberServer
     private let session: URLSession
 
-    init(baseURL: URL, token: String) {
-        self.baseURL = baseURL
-        self.token = token
+    init(server: ChamberServer) {
+        self.server = server
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 10
         configuration.waitsForConnectivity = false
         session = URLSession(configuration: configuration)
     }
 
-    // MARK: Unauthenticated
-
     /// `GET /health` answers without auth, so this is how the droplet waits
-    /// for OpenChamber to start without spending a token on it.
+    /// for a server to come up without spending a token on it.
     static func isReachable(_ baseURL: URL) async -> Bool {
         var request = URLRequest(url: baseURL.appending(path: "health"))
         request.timeoutInterval = 3
@@ -80,59 +137,6 @@ actor OpenChamberClient {
               (response as? HTTPURLResponse)?.statusCode == 200,
               let body = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return body["status"] as? String == "ok"
-    }
-
-    /// Redeems an `openchamber://connect?v=2&p=…` link against `baseURL` and
-    /// returns the device's bearer token. The link's own server candidates are
-    /// ignored on purpose: Droppy runs on the Mac OpenChamber runs on.
-    static func redeem(link: String, baseURL: URL, deviceKey: String, appVersion: String) async throws -> String {
-        let pairing = try pairingPayload(from: link)
-        var request = URLRequest(url: baseURL.appending(path: "api/client-auth/pairing/redeem"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "pairingId": pairing.id,
-            "secret": pairing.secret,
-            "clientLabel": "Droppy",
-            "clientKind": "desktop",
-            "deviceName": Host.current().localizedName ?? "Mac",
-            "devicePlatform": "macos",
-            "appVersion": appVersion,
-            "dedupeKey": deviceKey,
-        ])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let body = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            throw OpenChamberError.pairingRejected(body?["error"] as? String ?? "OpenChamber refused the pairing link.")
-        }
-        guard let token = body?["clientToken"] as? String, token.hasPrefix("oc_client_") else {
-            throw OpenChamberError.invalidResponse
-        }
-        return token
-    }
-
-    static func pairingPayload(from link: String) throws -> (id: String, secret: String) {
-        guard let components = URLComponents(string: link.trimmingCharacters(in: .whitespacesAndNewlines)),
-              components.scheme == "openchamber", components.host == "connect",
-              let encoded = components.queryItems?.first(where: { $0.name == "p" })?.value else {
-            throw OpenChamberError.badPairingLink
-        }
-        var base64 = encoded.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
-        guard let data = Data(base64Encoded: base64),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let id = payload["pairingId"] as? String,
-              let secret = payload["secret"] as? String else {
-            throw OpenChamberError.badPairingLink
-        }
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let expires = payload["expiresAt"] as? String,
-           let date = fractional.date(from: expires) ?? ISO8601DateFormatter().date(from: expires),
-           date < Date() {
-            throw OpenChamberError.pairingRejected("That pairing link has expired. Create a new one in OpenChamber.")
-        }
-        return (id, secret)
     }
 
     // MARK: Activity
@@ -208,15 +212,16 @@ actor OpenChamberClient {
         guard let minted = try await json("POST", "auth/url-token") as? [String: Any],
               let urlToken = minted["token"] as? String else { throw OpenChamberError.invalidResponse }
 
-        var components = URLComponents(url: baseURL.appending(path: "api/global/event/ws"), resolvingAgainstBaseURL: false)!
-        components.scheme = baseURL.scheme == "https" ? "wss" : "ws"
+        var components = URLComponents(url: server.baseURL.appending(path: "api/global/event/ws"), resolvingAgainstBaseURL: false)!
+        components.scheme = server.baseURL.scheme == "https" ? "wss" : "ws"
         components.queryItems = [URLQueryItem(name: "oc_url_token", value: urlToken)]
             + (lastEventID.map { [URLQueryItem(name: "lastEventId", value: $0)] } ?? [])
 
         // The upgrade is refused without an Origin matching the server's own
         // host (`isRequestOriginAllowed`), and URLSession sends none.
         var request = URLRequest(url: components.url!)
-        request.setValue(baseURL.origin, forHTTPHeaderField: "Origin")
+        for (name, value) in server.headers { request.setValue(value, forHTTPHeaderField: name) }
+        request.setValue(server.baseURL.origin, forHTTPHeaderField: "Origin")
         let task = session.webSocketTask(with: request)
         // A tool's output rides in its success event; the default 1 MB cap
         // would drop the connection on one large read.
@@ -267,11 +272,12 @@ actor OpenChamberClient {
         directory: String? = nil,
         body: [String: Any]? = nil
     ) async throws -> Any? {
-        var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
+        var components = URLComponents(url: server.baseURL.appending(path: path), resolvingAgainstBaseURL: false)!
         if !query.isEmpty { components.queryItems = query }
         var request = URLRequest(url: components.url!)
         request.httpMethod = method
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        for (name, value) in server.headers { request.setValue(value, forHTTPHeaderField: name) }
+        request.setValue("Bearer \(server.token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         if let directory {
             // OpenCode scopes a request to a project through this header, and
@@ -287,46 +293,6 @@ actor OpenChamberClient {
         if status == 401 { throw OpenChamberError.unauthorized }
         guard (200..<300).contains(status) else { throw OpenChamberError.http(status) }
         return data.isEmpty ? nil : try JSONSerialization.jsonObject(with: data)
-    }
-}
-
-// MARK: - Keychain
-
-/// The device token lives in the Keychain, never in the droplet's preferences,
-/// which are plain user defaults.
-enum TokenStore {
-    private static let service = "app.getdroppy.droplet.openchamber"
-
-    static func read(for server: URL) -> String? {
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching([
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: server.absoluteString,
-            kSecReturnData: true,
-        ] as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    @discardableResult
-    static func save(_ token: String, for server: URL) -> Bool {
-        delete(for: server)
-        return SecItemAdd([
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: server.absoluteString,
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData: Data(token.utf8),
-        ] as CFDictionary, nil) == errSecSuccess
-    }
-
-    static func delete(for server: URL) {
-        SecItemDelete([
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: server.absoluteString,
-        ] as CFDictionary)
     }
 }
 

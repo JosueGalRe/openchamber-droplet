@@ -120,6 +120,19 @@ struct ActivityState: Equatable, Sendable {
 
     var pendingCount: Int { permissions.count + forms.count }
 
+    /// Every server's state as one, for the notch. Each server keeps its own
+    /// state so a seed from one never wipes another's pending requests.
+    static func merged(_ states: [ActivityState]) -> ActivityState {
+        var result = ActivityState()
+        for state in states {
+            result.sessions.merge(state.sessions) { current, _ in current }
+            result.activity.merge(state.activity) { current, _ in current }
+            result.permissions += state.permissions
+            result.forms += state.forms
+        }
+        return result
+    }
+
     /// Sessions that are busy now, longest-running first. Subagent sessions
     /// are left out once we know they are subagents: the parent already counts.
     var busySessionIDs: [String] {

@@ -3,7 +3,7 @@
   "name": "OpenChamber",
   "version": "1.0.0",
   "summary": "Your OpenChamber sessions, approvals and usage in the notch",
-  "description": "OpenChamber puts the coding sessions you run in OpenChamber beside the notch: what is working, for how long, and which tool each session is in.\n\nWhen a session asks for permission, a card appears on the notch with the exact command, and you allow it once or reject it without leaving what you are doing. The shelf widget keeps every pending request, with Always for the ones you trust. A second widget shows each plan's usage windows from OpenChamber's Usage page, and warns you as one passes 80% and 95%.\n\nPair this Mac once from the droplet's settings with a link from OpenChamber. The device token stays in your Keychain, and the droplet only talks to the OpenChamber server on this Mac.",
+  "description": "OpenChamber puts the coding sessions you run in OpenChamber beside the notch: what is working, for how long, and which tool each session is in.\n\nWhen a session asks for permission, a card appears on the notch with the exact command, and you allow it once or reject it without leaving what you are doing. The shelf widget keeps every pending request, with Always for the ones you trust. A second widget shows each plan's usage windows from OpenChamber's Usage page, and warns you as one passes 80% and 95%.\n\nIt watches every server OpenChamber Desktop on this Mac is set up for, this Mac's own and your remote hosts, using the tokens Desktop already has, so there is nothing to pair.",
   "category": "Productivity",
   "kit": {
     "abi": 1,

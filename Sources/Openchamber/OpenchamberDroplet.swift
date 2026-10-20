@@ -16,7 +16,8 @@ public final class OpenchamberPrincipal: NSObject, DropletPrincipal {
     @MainActor public func makeDroplet() -> AnyObject { OpenchamberDroplet() }
 }
 
-/// OpenChamber's sessions, approvals and plan usage, in the notch.
+/// OpenChamber's sessions, approvals and plan usage, in the notch, from every
+/// server OpenChamber Desktop on this Mac is set up for.
 @MainActor
 public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// Must equal `DroppyDropletID` in the bundle's Info.plist and `id` in
@@ -24,30 +25,37 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     public nonisolated static let id: DropletID = "openchamber"
 
     enum Connection: Equatable {
-        case notPaired
+        /// OpenChamber Desktop's settings were not found, or list no server.
+        case noServers
         case offline
         case connecting
         case live
         case failed(String)
     }
 
+    /// One server's slice of everything the droplet shows.
+    struct ServerState: Equatable {
+        var activity = ActivityState()
+        var connection: Connection = .connecting
+        var usage: [ProviderQuota] = []
+        var usageFetchedAt: Date?
+    }
+
     static let sessionsWidgetID: ShelfWidgetID = "sessions"
     static let usageWidgetID: ShelfWidgetID = "usage"
-    static let defaultServer = URL(string: "http://127.0.0.1:4097")!
 
+    @Published private(set) var servers: [ChamberServer] = []
+    @Published private(set) var serverStates: [String: ServerState] = [:]
+    /// Every server's activity merged, recomputed on each change.
     @Published private(set) var state = ActivityState()
     @Published private(set) var phase: ActivityPhase = .idle
-    @Published private(set) var usage: [ProviderQuota] = []
-    @Published private(set) var connection: Connection = .notPaired
     @Published private(set) var seat: DropletLiveActivitySeat = .none(.idle)
-    @Published var pairingError: String?
 
     private(set) var host: DropletHost?
-    private var client: OpenChamberClient?
-    private var feed: Task<Void, Never>?
+    private var clients: [String: OpenChamberClient] = [:]
+    private var feeds: [String: Task<Void, Never>] = [:]
+    private var usageRefreshes: [String: Task<Void, Never>] = [:]
     private var ticker: AnyCancellable?
-    private var usageFetchedAt: Date?
-    private var usageRefresh: Task<Void, Never>?
     private var sessionLookups: Set<String> = []
     private var announcedPermissions: Set<String> = []
     private var usageWarnings: Set<String> = []
@@ -61,7 +69,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         if host.environment.isHarness {
             loadSample()
         } else {
-            startFeed()
+            reloadServers()
         }
         host.shortcuts.register(id: "approve-oldest", title: "Allow the oldest OpenChamber request once", defaultShortcut: nil) { [weak self] in
             guard let self, let oldest = self.state.permissions.first else { return }
@@ -76,10 +84,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     }
 
     public func deactivate() {
-        feed?.cancel()
-        feed = nil
-        usageRefresh?.cancel()
-        usageRefresh = nil
+        stopFeeds()
         ticker?.cancel()
         ticker = nil
         host?.shortcuts.unregister(id: "approve-oldest")
@@ -87,15 +92,10 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         for id in announcedPermissions { host?.hud.dismiss(id: hudID(id)) }
         activitySubject.send(nil)
         lockScreenSubject.send(nil)
-        client = nil
         host = nil
     }
 
     // MARK: Settings
-
-    var serverURL: URL {
-        host?.preferences.value(forKey: "server", as: String.self).flatMap(URL.init(string:)) ?? Self.defaultServer
-    }
 
     var showsPermissionCards: Bool {
         host?.preferences.value(forKey: "permissionCards", default: true) ?? true
@@ -110,142 +110,152 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         objectWillChange.send()
     }
 
-    func setServer(_ text: String) {
-        guard let url = URL(string: text.trimmingCharacters(in: .whitespaces)), url.scheme?.hasPrefix("http") == true else { return }
-        setPreference(url.absoluteString, forKey: "server")
-        restartFeed()
+    /// Reads OpenChamber Desktop's servers again and reconnects to each.
+    func reloadServers() {
+        stopFeeds()
+        servers = DesktopServers.load()
+        serverStates = Dictionary(uniqueKeysWithValues: servers.map { ($0.id, ServerState()) })
+        sessionLookups = []
+        publish()
+        for server in servers {
+            feeds[server.id] = Task { [weak self] in await self?.runFeed(server) }
+        }
+        host?.log.info("watching \(servers.count) OpenChamber server\(servers.count == 1 ? "" : "s")")
     }
 
-    func pair(with link: String) {
-        pairingError = nil
-        let server = serverURL
-        // One key per Mac, so pairing again replaces this device in
-        // OpenChamber's list instead of adding a second one.
-        let deviceKey = host?.preferences.value(forKey: "deviceKey", as: String.self) ?? {
-            let key = "droppy-\(UUID().uuidString)"
-            host?.preferences.setValue(key, forKey: "deviceKey")
-            return key
-        }()
-        let appVersion = host?.environment.appVersion ?? "unknown"
-        Task {
-            do {
-                let token = try await OpenChamberClient.redeem(link: link, baseURL: server, deviceKey: deviceKey, appVersion: appVersion)
-                guard TokenStore.save(token, for: server) else {
-                    pairingError = "The Keychain refused to store the device token."
-                    return
-                }
-                restartFeed()
-            } catch {
-                pairingError = error.localizedDescription
+    private func stopFeeds() {
+        feeds.values.forEach { $0.cancel() }
+        usageRefreshes.values.forEach { $0.cancel() }
+        feeds = [:]
+        usageRefreshes = [:]
+        clients = [:]
+    }
+
+    /// The whole droplet's connection, for the widgets: live if any server is.
+    var connection: Connection {
+        let all = servers.compactMap { serverStates[$0.id]?.connection }
+        if all.isEmpty { return .noServers }
+        if all.contains(.live) { return .live }
+        if all.allSatisfy({ $0 == .offline }) { return .offline }
+        return all.first { if case .failed = $0 { return true } else { return false } } ?? .connecting
+    }
+
+    /// Every server's plan usage. A remote server's providers carry its name,
+    /// since the same provider there is usually another account.
+    var usage: [ProviderQuota] {
+        servers.flatMap { server in
+            (serverStates[server.id]?.usage ?? []).map { quota in
+                server.isLocal ? quota : ProviderQuota(id: "\(server.id).\(quota.id)", name: "\(quota.name) · \(server.label)", plan: quota.plan, windows: quota.windows)
             }
         }
     }
 
-    func forgetDevice() {
-        TokenStore.delete(for: serverURL)
-        restartFeed()
-    }
-
-    // MARK: Feed
-
-    private func restartFeed() {
-        feed?.cancel()
-        state = ActivityState()
-        usage = []
-        usageFetchedAt = nil
-        publish()
-        startFeed()
-    }
-
-    private func startFeed() {
-        feed = Task { [weak self] in await self?.runFeed() }
-    }
+    // MARK: Feeds
 
     /// Connects, seeds, streams, and starts over when the stream drops. Waits
-    /// on `/health` while OpenChamber is closed, which costs no token.
-    private func runFeed() async {
+    /// on `/health` while the server is down, which costs no token.
+    private func runFeed(_ initial: ChamberServer) async {
+        var server = initial
         var backoff: TimeInterval = 2
         var lastEventID: String?
         while !Task.isCancelled {
-            let server = serverURL
-            guard let token = TokenStore.read(for: server) else {
-                connection = .notPaired
-                return
-            }
-            guard await OpenChamberClient.isReachable(server) else {
-                connection = .offline
+            guard await OpenChamberClient.isReachable(server.baseURL) else {
+                setConnection(.offline, for: server.id)
                 try? await Task.sleep(for: .seconds(15))
                 continue
             }
-            let client = OpenChamberClient(baseURL: server, token: token)
-            self.client = client
+            let client = OpenChamberClient(server: server)
+            clients[server.id] = client
             do {
-                connection = .connecting
-                apply(try await client.seed())
-                apply(.sessionsListed(try await client.recentSessions()))
+                setConnection(.connecting, for: server.id)
+                apply(try await client.seed(), from: server.id)
+                apply(.sessionsListed(try await client.recentSessions()), from: server.id)
                 let stream = try await client.events(after: lastEventID)
-                connection = .live
+                setConnection(.live, for: server.id)
                 backoff = 2
-                refreshUsage(ifOlderThan: 60)
+                refreshUsage(on: server.id, ifOlderThan: 60)
                 for try await frame in stream {
                     switch frame {
                     case let .ready(replayReset):
-                        if replayReset { apply(try await client.seed()) }
+                        if replayReset { apply(try await client.seed(), from: server.id) }
                     case let .event(event, eventID):
                         if let eventID { lastEventID = eventID }
-                        if let event { apply(event) }
+                        if let event { apply(event, from: server.id) }
                     }
                 }
             } catch OpenChamberError.unauthorized {
-                TokenStore.delete(for: server)
-                connection = .notPaired
-                return
+                // OpenChamber Desktop renews its tokens: take the current one.
+                if let fresh = DesktopServers.load().first(where: { $0.id == server.id }), fresh.token != server.token {
+                    server = fresh
+                    continue
+                }
+                setConnection(.failed(OpenChamberError.unauthorized.localizedDescription), for: server.id)
+                backoff = 60
             } catch is CancellationError {
                 return
             } catch {
-                connection = .failed(error.localizedDescription)
-                host?.log.error("event stream ended: \(error.localizedDescription)")
+                setConnection(.failed(error.localizedDescription), for: server.id)
+                host?.log.error("\(server.label): event stream ended: \(error.localizedDescription)")
             }
             try? await Task.sleep(for: .seconds(backoff))
-            backoff = min(backoff * 2, 30)
+            backoff = min(backoff * 2, 60)
         }
     }
 
-    private func apply(_ event: ActivityEvent) {
-        let wasBusy = !state.busySessionIDs.isEmpty
-        state.apply(event)
-        lookUpUnknownSessions()
-        announceNewPermissions()
-        if wasBusy, state.busySessionIDs.isEmpty {
+    private func setConnection(_ connection: Connection, for serverID: String) {
+        guard serverStates[serverID]?.connection != connection else { return }
+        serverStates[serverID]?.connection = connection
+    }
+
+    private func apply(_ event: ActivityEvent, from serverID: String) {
+        guard var server = serverStates[serverID] else { return }
+        let wasBusy = !server.activity.busySessionIDs.isEmpty
+        server.activity.apply(event)
+        serverStates[serverID] = server
+        lookUpUnknownSessions(on: serverID)
+        if wasBusy, server.activity.busySessionIDs.isEmpty {
             // A turn just ended: usage moved, and this is the moment it is worth asking.
-            refreshUsage(ifOlderThan: 30)
+            refreshUsage(on: serverID, ifOlderThan: 30)
         }
         publish()
     }
 
-    private func lookUpUnknownSessions() {
-        guard let client else { return }
-        for id in state.unknownSessionIDs.subtracting(sessionLookups) {
+    private func lookUpUnknownSessions(on serverID: String) {
+        guard let client = clients[serverID], let unknown = serverStates[serverID]?.activity.unknownSessionIDs else { return }
+        for id in unknown.subtracting(sessionLookups) {
             sessionLookups.insert(id)
             Task {
-                if let info = try? await client.session(id: id) {
-                    state.apply(.sessionsListed([info]))
-                    publish()
-                }
+                if let info = try? await client.session(id: id) { apply(.sessionsListed([info]), from: serverID) }
             }
         }
+    }
+
+    /// The server a session belongs to, for routing an action back to it.
+    private func serverID(forSession id: String) -> String? {
+        serverStates.first { _, server in
+            server.activity.activity[id] != nil
+                || server.activity.sessions[id] != nil
+                || server.activity.permissions.contains { $0.sessionID == id }
+                || server.activity.forms.contains { $0.sessionID == id }
+        }?.key
+    }
+
+    /// The server's name, when there is more than one server to tell apart.
+    func serverLabel(forSession id: String) -> String? {
+        guard servers.count > 1, let serverID = serverID(forSession: id) else { return nil }
+        return servers.first { $0.id == serverID }?.label
     }
 
     // MARK: Actions
 
     func reply(to permission: PendingPermission, decision: String) {
-        guard let client else { return }
+        guard let serverID = serverID(forSession: permission.sessionID), let client = clients[serverID] else { return }
         Task {
             do {
                 try await client.reply(to: permission, decision: decision)
                 // The `permission.replied` event settles it too; this is so the
                 // card goes the moment the click lands.
-                apply(.permissionSettled(sessionID: permission.sessionID, requestID: permission.id))
+                apply(.permissionSettled(sessionID: permission.sessionID, requestID: permission.id), from: serverID)
                 host?.feedback.play(.success)
             } catch {
                 host?.log.error("permission reply failed: \(error.localizedDescription)")
@@ -255,11 +265,13 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     }
 
     func interrupt(sessionID: String) {
-        guard let client else { return }
+        guard let serverID = serverID(forSession: sessionID), let client = clients[serverID] else { return }
         let directory = state.sessions[sessionID]?.directory
         Task { try? await client.interrupt(sessionID: sessionID, directory: directory) }
     }
 
+    /// Opens the session in OpenChamber Desktop. A remote server's session
+    /// opens there too once Desktop is switched to that host.
     func openSession(_ id: String) {
         guard let url = URL(string: "openchamber://session/\(id)") else { return }
         _ = host?.workspace.open(url)
@@ -271,9 +283,13 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     // MARK: Presenting
 
-    /// Recomputes the phase and pushes it to the notch and the lock screen.
-    /// Cheap to call often: the host diffs both before it redraws.
+    /// Merges the servers, recomputes the phase and pushes it to the notch and
+    /// the lock screen. Cheap to call often: the host diffs before it redraws.
     private func publish(now: Date = Date()) {
+        let merged = ActivityState.merged(servers.compactMap { serverStates[$0.id]?.activity })
+        if merged != state { state = merged }
+        announceNewPermissions()
+
         let next = state.phase(at: now)
         if next != phase { phase = next }
 
@@ -360,28 +376,32 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// when a turn ends, when the widget appears, and every five minutes while
     /// something is busy.
     func refreshUsage(ifOlderThan age: TimeInterval) {
-        guard let client, usageRefresh == nil else { return }
-        if let fetched = usageFetchedAt, Date().timeIntervalSince(fetched) < age { return }
-        usageRefresh = Task {
-            defer { usageRefresh = nil }
+        for server in servers { refreshUsage(on: server.id, ifOlderThan: age) }
+    }
+
+    private func refreshUsage(on serverID: String, ifOlderThan age: TimeInterval) {
+        guard let client = clients[serverID], usageRefreshes[serverID] == nil else { return }
+        if let fetched = serverStates[serverID]?.usageFetchedAt, Date().timeIntervalSince(fetched) < age { return }
+        usageRefreshes[serverID] = Task {
+            defer { usageRefreshes[serverID] = nil }
             guard let ids = try? await client.quotaProviderIDs() else { return }
             var results: [ProviderQuota] = []
             for id in ids {
                 if let quota = try? await client.quota(providerID: id) { results.append(quota) }
             }
-            usage = results
-            usageFetchedAt = Date()
+            serverStates[serverID]?.usage = results
+            serverStates[serverID]?.usageFetchedAt = Date()
             warnAboutUsage()
-            scheduleBusyUsageRefresh()
+            scheduleBusyUsageRefresh(on: serverID)
         }
     }
 
-    private func scheduleBusyUsageRefresh() {
-        guard !state.busySessionIDs.isEmpty else { return }
+    private func scheduleBusyUsageRefresh(on serverID: String) {
+        guard serverStates[serverID]?.activity.busySessionIDs.isEmpty == false else { return }
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(300))
-            guard let self, !self.state.busySessionIDs.isEmpty else { return }
-            self.refreshUsage(ifOlderThan: 290)
+            guard let self, self.serverStates[serverID]?.activity.busySessionIDs.isEmpty == false else { return }
+            self.refreshUsage(on: serverID, ifOlderThan: 290)
         }
     }
 
@@ -518,7 +538,7 @@ extension OpenchamberDroplet: LockScreenStatusProviding {
 
 extension OpenchamberDroplet: MenuBarExtraProviding {
     public func makeMenuBarExtra() -> MenuBarExtraDescriptor? {
-        guard connection != .notPaired else { return nil }
+        guard !servers.isEmpty else { return nil }
         return MenuBarExtraDescriptor(title: "OpenChamber", systemImage: "cube") { [weak self] in
             guard let self else { return AnyView(EmptyView()) }
             return AnyView(MenuBarSummary(droplet: self))
@@ -534,44 +554,54 @@ extension OpenchamberDroplet: SettingsPaneProviding {
     }
 
     public var settingsSearchEntries: [SettingsSearchEntry] {
-        [SettingsSearchEntry(title: "OpenChamber pairing", keywords: ["pair", "token", "server", "opencode"])]
+        [SettingsSearchEntry(title: "OpenChamber servers", keywords: ["server", "host", "token", "opencode"])]
     }
 }
 
 // MARK: - Harness sample
 
 private extension OpenchamberDroplet {
-    /// What the harness shows: no network, one of everything.
+    /// What the harness shows: no network, two servers, one of everything.
     func loadSample() {
         let now = Date()
-        state.apply(.sessionsListed([
+        let mac = ChamberServer(id: ChamberServer.localID, label: "This Mac", baseURL: URL(string: "http://127.0.0.1:4097")!, token: "", headers: [:])
+        let remote = ChamberServer(id: "remote", label: "devbox", baseURL: URL(string: "http://192.168.1.30:4097")!, token: "", headers: [:])
+        servers = [mac, remote]
+
+        var local = ServerState(connection: .live)
+        local.activity.apply(.sessionsListed([
             SessionInfo(id: "s1", title: "Fix notification title cache", directory: "/Users/me/projects/openchamber", parentID: nil),
             SessionInfo(id: "s2", title: "Design the droplet", directory: "/Users/me/projects/openchamber-droplet", parentID: nil),
         ]))
-        state.apply(.executionStarted(sessionID: "s1", at: now.addingTimeInterval(-252)))
+        local.activity.apply(.executionStarted(sessionID: "s1", at: now.addingTimeInterval(-252)))
         for (index, mark) in [true, true, false, true, true].enumerated() {
-            state.apply(.toolStarted(sessionID: "s1", callID: "c\(index)", name: "read"))
-            state.apply(.toolFinished(sessionID: "s1", callID: "c\(index)", succeeded: mark))
+            local.activity.apply(.toolStarted(sessionID: "s1", callID: "c\(index)", name: "read"))
+            local.activity.apply(.toolFinished(sessionID: "s1", callID: "c\(index)", succeeded: mark))
         }
-        state.apply(.toolStarted(sessionID: "s1", callID: "c9", name: "edit"))
-        state.apply(.toolCalled(sessionID: "s1", callID: "c9", name: nil, target: "session-runtime.js"))
-        state.apply(.executionStarted(sessionID: "s2", at: now.addingTimeInterval(-48)))
-        state.apply(.permissionAsked(PendingPermission(
+        local.activity.apply(.toolStarted(sessionID: "s1", callID: "c9", name: "edit"))
+        local.activity.apply(.toolCalled(sessionID: "s1", callID: "c9", name: nil, target: "session-runtime.js"))
+        local.activity.apply(.executionStarted(sessionID: "s2", at: now.addingTimeInterval(-48)))
+        local.activity.apply(.permissionAsked(PendingPermission(
             id: "p1", sessionID: "s2", action: "bash",
             resources: ["swift build -c release --product Openchamber"],
             directory: "/Users/me/projects/openchamber-droplet"
         )))
-        usage = [
+        local.usage = [
             ProviderQuota(id: "claude", name: "Claude", plan: "Max", windows: [
                 QuotaWindow(name: "5h", usedPercent: 82, windowSeconds: 18_000, resetAt: now.addingTimeInterval(4_320)),
                 QuotaWindow(name: "7d", usedPercent: 38, windowSeconds: 604_800, resetAt: now.addingTimeInterval(273_600)),
             ]),
+        ]
+
+        var work = ServerState(connection: .live)
+        work.activity.apply(.sessionsListed([SessionInfo(id: "w1", title: "Kiro migration", directory: "/home/bryan/work/api", parentID: nil)]))
+        work.activity.apply(.executionStarted(sessionID: "w1", at: now.addingTimeInterval(-610)))
+        work.usage = [
             ProviderQuota(id: "codex", name: "Codex", plan: "Pro", windows: [
                 QuotaWindow(name: "5h", usedPercent: 21, windowSeconds: 18_000, resetAt: now.addingTimeInterval(9_600)),
             ]),
         ]
-        connection = .live
-        announceNewPermissions()
+        serverStates = [mac.id: local, remote.id: work]
         publish(now: now)
     }
 }
