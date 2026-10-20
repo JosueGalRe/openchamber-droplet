@@ -269,12 +269,12 @@ private struct SessionsPage: View {
             }
         } else if let form = state.forms.first {
             FormView(droplet: droplet, form: form, compact: context.isNarrow)
-        } else if busy.count == 1 || (context.isNarrow && !busy.isEmpty), let id = primary {
-            SessionHero(droplet: droplet, sessionID: id, compact: context.isNarrow)
+        } else if busy.count == 1 {
+            SessionHero(droplet: droplet, sessionID: busy[0], compact: context.isNarrow)
         } else if busy.count > 1 {
             VStack(alignment: .leading, spacing: DroppySpacing.smd) {
                 ForEach(busy.suffix(3).reversed(), id: \.self) { id in
-                    SessionLine(droplet: droplet, sessionID: id, oneLine: false)
+                    SessionLine(droplet: droplet, sessionID: id, oneLine: false, compact: context.isNarrow)
                 }
                 Spacer(minLength: 0)
                 if busy.count > 3 {
@@ -288,15 +288,6 @@ private struct SessionsPage: View {
         } else {
             ServerTiles(droplet: droplet, context: context)
         }
-    }
-
-    /// The session the page follows: one in a tool call right now, else one
-    /// that has done something, else the one that started last.
-    private var primary: String? {
-        let busy = state.busySessionIDs
-        return busy.last { state.activity[$0]?.calls.last?.mark == .running }
-            ?? busy.last { state.activity[$0]?.calls.isEmpty == false }
-            ?? busy.last
     }
 }
 
@@ -382,6 +373,8 @@ private struct SessionLine: View {
     let droplet: OpenchamberDroplet
     let sessionID: String
     let oneLine: Bool
+    /// A narrow row keeps the server, which tells the sessions apart, and drops the project.
+    var compact = false
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
@@ -407,7 +400,7 @@ private struct SessionLine: View {
                 HStack(spacing: DroppySpacing.sm) {
                     NarrationText(narration: activity.narration, failed: false, size: 12)
                     Spacer(minLength: DroppySpacing.sm)
-                    Text([droplet.serverLabel(forSession: sessionID), session?.project].compactMap { $0 }.joined(separator: " · "))
+                    Text([droplet.serverLabel(forSession: sessionID), compact ? nil : session?.project].compactMap { $0 }.joined(separator: " · "))
                         .font(.system(size: 11))
                         .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                         .lineLimit(1)
