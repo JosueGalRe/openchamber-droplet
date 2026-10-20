@@ -636,7 +636,7 @@ struct OpenchamberSettings: View {
     var body: some View {
         DropletSettingsPane {
             DropletSettingsCard {
-                DropletControlRow(title: "Connection") {
+                DropletControlRow(title: "Connection", infoTip: failure) {
                     DropletValuePill(text: status)
                 }
                 DropletStackedRow(title: "Server", infoTip: "Where OpenChamber listens on this Mac.") {
@@ -702,6 +702,12 @@ struct OpenchamberSettings: View {
         case .live: return "Connected"
         case .failed: return "Reconnecting"
         }
+    }
+
+    /// Why the last connection attempt failed, behind the row's (i).
+    private var failure: String? {
+        if case let .failed(message) = droplet.connection { return message }
+        return nil
     }
 
     private func preference(_ key: String, value: Bool) -> Binding<Bool> {

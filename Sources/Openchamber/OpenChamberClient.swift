@@ -213,7 +213,11 @@ actor OpenChamberClient {
         components.queryItems = [URLQueryItem(name: "oc_url_token", value: urlToken)]
             + (lastEventID.map { [URLQueryItem(name: "lastEventId", value: $0)] } ?? [])
 
-        let task = session.webSocketTask(with: components.url!)
+        // The upgrade is refused without an Origin matching the server's own
+        // host (`isRequestOriginAllowed`), and URLSession sends none.
+        var request = URLRequest(url: components.url!)
+        request.setValue(baseURL.origin, forHTTPHeaderField: "Origin")
+        let task = session.webSocketTask(with: request)
         // A tool's output rides in its success event; the default 1 MB cap
         // would drop the connection on one large read.
         task.maximumMessageSize = 16 * 1024 * 1024
@@ -328,4 +332,15 @@ enum TokenStore {
 
 private extension String {
     var urlPathEncoded: String { addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) ?? self }
+}
+
+extension URL {
+    /// `http://127.0.0.1:4097`: scheme, host and port, as a browser's Origin header.
+    var origin: String {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host()
+        components.port = port
+        return components.string ?? absoluteString
+    }
 }

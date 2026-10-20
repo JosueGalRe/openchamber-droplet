@@ -204,7 +204,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 return
             } catch {
                 connection = .failed(error.localizedDescription)
-                host?.log.notice("event stream ended: \(error.localizedDescription)")
+                host?.log.error("event stream ended: \(error.localizedDescription)")
             }
             try? await Task.sleep(for: .seconds(backoff))
             backoff = min(backoff * 2, 30)
