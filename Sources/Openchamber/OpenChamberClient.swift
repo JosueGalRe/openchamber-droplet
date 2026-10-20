@@ -112,22 +112,32 @@ enum DesktopServers {
 }
 
 struct QuotaWindow: Equatable, Sendable, Identifiable {
-    var id: String { name }
+    var id: String { "\(model ?? "").\(name)" }
+    /// OpenChamber's key for the window: `5h`, `7d`, `extra_usage`, …
     let name: String
+    /// Set for a window that limits one model, such as Claude's weekly Fable limit.
+    var model: String? = nil
     let usedPercent: Double?
     let windowSeconds: Double?
     let resetAt: Date?
 }
 
 struct ProviderQuota: Equatable, Sendable, Identifiable {
+    /// Unique across servers.
     let id: String
+    /// OpenChamber's provider id, which picks the icon and colour.
+    let provider: String
     let name: String
     let plan: String?
-    /// Shortest window first, the order OpenChamber's Usage page reads.
+    /// The remote server this came from; nil for this Mac.
+    var server: String? = nil
+    /// Account-wide windows first, shortest first, then each model's.
     let windows: [QuotaWindow]
 
     /// The window closest to running out.
     var tightest: QuotaWindow? { windows.max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) } }
+    /// What is left of the tightest window, the number Agents puts under its ring.
+    var percentLeft: Double? { tightest?.usedPercent.map { max(0, 100 - $0) } }
 }
 
 /// One frame of the global event stream, already lifted out of JSON.
@@ -207,24 +217,37 @@ actor OpenChamberClient {
     }
 
     func quota(providerID: String) async throws -> ProviderQuota? {
-        guard let body = try await json("GET", "api/quota/\(providerID.urlPathEncoded)") as? [String: Any],
-              body["ok"] as? Bool == true else { return nil }
-        let windows = ((body["usage"] as? [String: Any])?["windows"] as? [String: [String: Any]] ?? [:])
-            .map { name, window in
-                QuotaWindow(
-                    name: name,
-                    usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue,
-                    windowSeconds: (window["windowSeconds"] as? NSNumber)?.doubleValue,
-                    resetAt: ActivityWire.date(fromMilliseconds: window["resetAt"])
-                )
-            }
-            .sorted { ($0.windowSeconds ?? .infinity) < ($1.windowSeconds ?? .infinity) }
-        guard !windows.isEmpty else { return nil }
+        let body = try await json("GET", "api/quota/\(providerID.urlPathEncoded)") as? [String: Any]
+        return body.flatMap { Self.quota(from: $0, providerID: providerID) }
+    }
+
+    /// One provider's `GET /api/quota/:id` body, with its per-model windows.
+    static func quota(from body: [String: Any], providerID: String) -> ProviderQuota? {
+        guard body["ok"] as? Bool == true, let usage = body["usage"] as? [String: Any] else { return nil }
+        func windows(_ record: Any?, model: String?) -> [QuotaWindow] {
+            ((record as? [String: [String: Any]]) ?? [:])
+                .map { name, window in
+                    QuotaWindow(
+                        name: name,
+                        model: model,
+                        usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue,
+                        windowSeconds: (window["windowSeconds"] as? NSNumber)?.doubleValue,
+                        resetAt: ActivityWire.date(fromMilliseconds: window["resetAt"])
+                    )
+                }
+                .sorted { ($0.windowSeconds ?? .infinity, $0.name) < ($1.windowSeconds ?? .infinity, $1.name) }
+        }
+        var all = windows(usage["windows"], model: nil)
+        for (model, record) in ((usage["models"] as? [String: [String: Any]]) ?? [:]).sorted(by: { $0.key < $1.key }) {
+            all += windows(record["windows"], model: model)
+        }
+        guard !all.isEmpty else { return nil }
         return ProviderQuota(
             id: providerID,
+            provider: providerID,
             name: body["providerName"] as? String ?? providerID,
             plan: body["planLabel"] as? String,
-            windows: windows
+            windows: all
         )
     }
 

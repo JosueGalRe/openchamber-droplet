@@ -29,6 +29,36 @@ enum Formatting {
         return "\(minutes)m"
     }
 
+    /// `5-hour limit`, `Weekly · all models`, `Weekly · Fable`.
+    static func windowLabel(_ window: QuotaWindow, in provider: ProviderQuota) -> String {
+        let base: String
+        switch window.name.lowercased() {
+        case "5h": base = "5-hour limit"
+        case "7d", "weekly", "week": base = "Weekly"
+        case "1d", "24h", "daily", "day": base = "Daily"
+        case "30d", "monthly", "month": base = "Monthly"
+        case "extra_usage": base = "Extra usage"
+        default:
+            let words = window.name.replacingOccurrences(of: "_", with: " ")
+            base = words.prefix(1).uppercased() + words.dropFirst()
+        }
+        if let model = window.model { return "\(base) · \(model)" }
+        let perModel = provider.windows.contains { $0.model != nil && $0.name == window.name }
+        return perModel ? "\(base) · all models" : base
+    }
+
+    /// `Resets in 4 hr 21 min` within a day, the date after that.
+    static func resetText(_ date: Date?, now: Date) -> String {
+        guard let date else { return "" }
+        let seconds = date.timeIntervalSince(now)
+        guard seconds > 0 else { return "Resetting" }
+        guard seconds >= 86_400 else {
+            let minutes = Int(seconds / 60)
+            return minutes >= 60 ? "Resets in \(minutes / 60) hr \(minutes % 60) min" : "Resets in \(minutes) min"
+        }
+        return date.formatted(.dateTime.day().month(.abbreviated))
+    }
+
     static func usageColor(_ percent: Double?) -> Color {
         switch percent ?? 0 {
         case 95...: return .red
@@ -57,7 +87,8 @@ struct CompactLabel: View {
             let (symbol, text, color) = label(at: timeline.date)
             HStack(spacing: 3) {
                 if let symbol {
-                    Image(systemName: symbol).font(.system(size: DroppyLiveActivityMetrics.labelFontSize - 2, weight: .semibold))
+                    // A lone symbol (the green check) stands in for a word, so it is drawn larger.
+                    Image(systemName: symbol).font(.system(size: DroppyLiveActivityMetrics.labelFontSize + (text.isEmpty ? 3 : -2), weight: .semibold))
                 }
                 Text(verbatim: text)
                     .font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .medium, design: .rounded))
@@ -92,16 +123,18 @@ struct CompactLabel: View {
             let elapsed = Formatting.elapsed(now.timeIntervalSince(since))
             return (nil, sessions > 1 ? "\(sessions) · \(elapsed)" : elapsed, primary)
         case let .retrying(_, _, at): return ("arrow.clockwise", Formatting.elapsed(at.timeIntervalSince(now)), primary)
-        case .finishing: return ("checkmark", "done", primary)
+        case .finishing: return ("checkmark.circle.fill", "", .green)
         case let .waiting(count): return ("hand.raised.fill", "\(count)", .orange)
         case .failed: return ("exclamationmark.triangle.fill", "failed", .red)
         }
     }
 }
 
-// MARK: - Sessions widget
+// MARK: - Widget
 
-struct SessionsWidget: View {
+/// The one widget: a Sessions page and a Usage page, switched from buttons in
+/// the header the way Droppy's Agents switches Progress and Usage.
+struct OpenchamberWidget: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let context: ShelfWidgetContext
 
@@ -109,29 +142,32 @@ struct SessionsWidget: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            WidgetHeader(title: "OpenChamber") {
-                if !context.isCompact, !state.busySessionIDs.isEmpty {
-                    Text(verbatim: "\(state.busySessionIDs.count) active")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            WidgetHeader(
+                symbol: droplet.tab == .sessions ? "checklist" : "gauge.with.dots.needle.33percent",
+                title: droplet.tab == .sessions ? "Sessions" : "Usage"
+            ) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    TabButton(droplet: droplet, tab: .sessions, symbol: "checklist", label: "Sessions", size: buttonSize)
+                    TabButton(droplet: droplet, tab: .usage, symbol: "gauge.with.dots.needle.33percent", label: "Usage", size: buttonSize)
                 }
             }
-            switch droplet.connection {
-            case .noServers:
+            if droplet.connection == .noServers {
                 NoServersMessage(droplet: droplet)
-            case .offline:
-                WidgetMessage(text: "OpenChamber isn't running.")
-            case let .failed(message):
-                WidgetMessage(text: "Can't reach OpenChamber. \(message)")
-            case .connecting, .live:
+                Spacer(minLength: 0)
+            } else if droplet.tab == .usage {
+                UsageRings(droplet: droplet, context: context)
+            } else if state.pendingCount == 0, state.busySessionIDs.isEmpty {
+                ServerTiles(droplet: droplet, context: context)
+            } else {
                 if context.isCompact { compact } else { full }
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
         }
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
+
+    private var buttonSize: CGFloat { context.isCompact ? 24 : 28 }
 
     @ViewBuilder private var full: some View {
         if let permission = state.permissions.first {
@@ -139,11 +175,7 @@ struct SessionsWidget: View {
         } else if let form = state.forms.first {
             FormTile(droplet: droplet, form: form, session: state.sessions[form.sessionID])
         }
-        let rows = state.busySessionIDs.prefix(state.pendingCount > 0 ? 1 : 3)
-        if rows.isEmpty, state.pendingCount == 0 {
-            WidgetMessage(text: "No sessions running.")
-        }
-        ForEach(Array(rows), id: \.self) { id in
+        ForEach(Array(state.busySessionIDs.prefix(state.pendingCount > 0 ? 1 : 3)), id: \.self) { id in
             SessionRow(droplet: droplet, sessionID: id)
         }
     }
@@ -181,17 +213,80 @@ struct SessionsWidget: View {
 }
 
 private struct WidgetHeader<Trailing: View>: View {
+    let symbol: String
     let title: String
     @ViewBuilder let trailing: Trailing
 
     var body: some View {
         HStack(spacing: DroppySpacing.xsm) {
-            ChamberGlyph(motion: .still, size: 12)
+            Image(systemName: symbol).font(.system(size: 12, weight: .medium))
             Text(title).font(.system(size: 12, weight: .semibold))
             Spacer(minLength: 0)
             trailing
         }
         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+    }
+}
+
+/// A page switch in the header: green while its page is showing, as in Agents.
+private struct TabButton: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+    let tab: OpenchamberDroplet.WidgetTab
+    let symbol: String
+    let label: String
+    let size: CGFloat
+
+    var body: some View {
+        let selected = droplet.tab == tab
+        Button { droplet.select(tab) } label: { Image(systemName: symbol) }
+            .buttonStyle(DroppyCircleButtonStyle(
+                size: size,
+                destructive: false,
+                solidFill: selected ? Color.green.opacity(0.22) : nil,
+                foregroundColorOverride: selected ? .green : nil
+            ))
+            .help(label)
+            .accessibilityLabel(label)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+/// Nothing running: one tile per server and how it is doing, where Agents
+/// shows a tile per agent.
+private struct ServerTiles: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+    let context: ShelfWidgetContext
+
+    var body: some View {
+        HStack(spacing: context.isCompact ? DroppySpacing.md : DroppySpacing.xl) {
+            ForEach(droplet.servers.prefix(context.isCompact ? 2 : 4)) { server in
+                VStack(spacing: DroppySpacing.xsm) {
+                    ChamberGlyph(motion: .still, size: context.isCompact ? 22 : 28)
+                        .frame(width: context.isCompact ? 46 : 58, height: context.isCompact ? 46 : 58)
+                        .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.ml, style: .continuous))
+                    Text(server.label)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                        .lineLimit(1)
+                    Text(status(of: server))
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: 96)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func status(of server: ChamberServer) -> String {
+        switch droplet.serverStates[server.id]?.connection ?? .connecting {
+        case .live: return droplet.serverStates[server.id]?.route?.hasPrefix("Through") == true ? "Idle · relay" : "Idle"
+        case .offline: return "Unreachable"
+        case .connecting: return "Connecting"
+        case .failed: return "Reconnecting"
+        case .noServers: return ""
+        }
     }
 }
 
@@ -384,137 +479,197 @@ private struct CallStrip: View {
     }
 }
 
-// MARK: - Usage widget
+// MARK: - Usage page
 
-struct UsageWidget: View {
+/// One ring per provider: what is left of its tightest window, in the
+/// provider's colour around its icon. A click opens every window.
+struct UsageRings: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let context: ShelfWidgetContext
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            WidgetHeader(title: "Usage") { EmptyView() }
-            if droplet.usage.isEmpty {
-                WidgetMessage(text: droplet.connection == .noServers
-                    ? "OpenChamber Desktop isn't set up on this Mac yet."
-                    : "No plan usage from OpenChamber yet.")
+        let providers = Array(droplet.usage.prefix(capacity))
+        Group {
+            if providers.isEmpty {
+                WidgetMessage(text: droplet.connection == .live ? "No plan usage from OpenChamber yet." : "OpenChamber isn't reachable.")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                    if context.isCompact { compact(now: timeline.date) } else { full(now: timeline.date) }
+                HStack(alignment: .top, spacing: context.isCompact ? DroppySpacing.md : DroppySpacing.xl) {
+                    ForEach(providers) { provider in
+                        RingTile(droplet: droplet, provider: provider, diameter: context.isCompact ? 50 : 62)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            Spacer(minLength: 0)
         }
-        .padding(context.contentInsets)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear {
             if !context.isPreview { droplet.refreshUsage(ifOlderThan: 60) }
         }
     }
 
-    private func full(now: Date) -> some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            ForEach(droplet.usage.prefix(2)) { provider in
-                VStack(alignment: .leading, spacing: DroppySpacing.xs) {
-                    HStack(spacing: DroppySpacing.xsm) {
-                        Text(provider.name)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                        if let plan = provider.plan {
-                            Text(plan)
-                                .font(.system(size: 11))
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        }
-                    }
-                    ForEach(provider.windows.prefix(2)) { window in
-                        HStack(spacing: DroppySpacing.sm) {
-                            Text(window.name)
-                                .frame(width: 24, alignment: .leading)
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                            UsageBar(percent: window.usedPercent)
-                            Text(verbatim: window.usedPercent.map { "\(Int($0))%" } ?? "–")
-                                .frame(width: 34, alignment: .trailing)
-                                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                            Text(verbatim: Formatting.countdown(to: window.resetAt, from: now))
-                                .frame(width: 50, alignment: .trailing)
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        }
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                    }
+    private var capacity: Int {
+        max(1, Int(context.availableSize.width / (context.isCompact ? 84 : 100)))
+    }
+}
+
+private struct RingTile: View {
+    let droplet: OpenchamberDroplet
+    let provider: ProviderQuota
+    let diameter: CGFloat
+    @State private var showsDetail = false
+
+    var body: some View {
+        let left = provider.percentLeft ?? 100
+        let line = diameter * 0.085
+        Button { showsDetail.toggle() } label: {
+            VStack(spacing: DroppySpacing.xs) {
+                ZStack {
+                    Circle().stroke(AdaptiveColors.notchSurfacePrimaryText.opacity(0.12), lineWidth: line)
+                    // What is used is the gap from twelve o'clock; the arc is what is left.
+                    Circle()
+                        .trim(from: 1 - left / 100, to: 1)
+                        .stroke(ProviderStyle.color(provider.provider), style: StrokeStyle(lineWidth: line, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    ProviderIcon(provider: provider.provider, name: provider.name, size: diameter * 0.46)
                 }
+                .frame(width: diameter, height: diameter)
+                .padding(line / 2)
+                Text(provider.name)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .lineLimit(1)
+                Text(verbatim: "\(Int(left.rounded()))% left")
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
             }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(provider.name), \(Int(left.rounded())) percent left")
+        .popover(isPresented: $showsDetail, arrowEdge: .bottom) {
+            UsageDetail(droplet: droplet, provider: provider)
         }
     }
+}
 
-    /// The window closest to running out as a ring, and the next two as lines.
-    @ViewBuilder private func compact(now: Date) -> some View {
-        let windows = droplet.usage
-            .flatMap { provider in provider.windows.map { (provider: provider, window: $0) } }
-            .sorted { ($0.window.usedPercent ?? 0) > ($1.window.usedPercent ?? 0) }
-        if let top = windows.first {
-            VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-                HStack(spacing: DroppySpacing.md) {
-                    UsageRing(percent: top.window.usedPercent)
+/// Every window of one provider, like Agents' usage card.
+private struct UsageDetail: View {
+    let droplet: OpenchamberDroplet
+    let provider: ProviderQuota
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { timeline in
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    ProviderIcon(provider: provider.provider, name: provider.name, size: 34)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(verbatim: "\(top.provider.name) · \(top.window.name)")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                            .lineLimit(1)
-                        Text(verbatim: "resets in \(Formatting.countdown(to: top.window.resetAt, from: now))")
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        Text(provider.name).font(.system(size: 15, weight: .semibold))
+                        let detail = [provider.plan, provider.server].compactMap { $0 }.joined(separator: " · ")
+                        if !detail.isEmpty {
+                            Text(detail).font(.system(size: 13)).foregroundStyle(.secondary)
+                        }
                     }
+                    Spacer(minLength: 12)
+                    Button { droplet.refreshUsage(ifOlderThan: 0) } label: { Image(systemName: "arrow.clockwise") }
+                        .buttonStyle(.borderless)
+                        .help("Refresh")
                 }
-                ForEach(windows.dropFirst().prefix(2), id: \.window.id) { entry in
-                    HStack {
-                        Text(verbatim: "\(entry.provider.name) \(entry.window.name)")
-                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                            .lineLimit(1)
-                        Spacer(minLength: DroppySpacing.md)
-                        Text(verbatim: entry.window.usedPercent.map { "\(Int($0))%" } ?? "–")
-                            .foregroundStyle(Formatting.usageColor(entry.window.usedPercent))
+                ForEach(provider.windows) { window in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .firstTextBaseline, spacing: DroppySpacing.sm) {
+                            Text(Formatting.windowLabel(window, in: provider)).font(.system(size: 14))
+                            Spacer(minLength: 12)
+                            Text(Formatting.resetText(window.resetAt, now: timeline.date))
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                            Text(verbatim: window.usedPercent.map { "\(Int($0.rounded()))%" } ?? "–")
+                                .font(.system(size: 14, weight: .semibold))
+                                .monospacedDigit()
+                        }
+                        UsageBar(percent: window.usedPercent, color: ProviderStyle.color(provider.provider))
                     }
-                    .font(.system(size: 11))
-                    .monospacedDigit()
                 }
             }
+            .padding(16)
+            .frame(width: 340)
         }
     }
 }
 
 private struct UsageBar: View {
     let percent: Double?
+    let color: Color
 
     var body: some View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
-                Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.12))
+                Capsule().fill(Color.primary.opacity(0.12))
                 Capsule()
-                    .fill(Formatting.usageColor(percent))
-                    .frame(width: proxy.size.width * min(1, max(0, (percent ?? 0) / 100)))
+                    .fill(color)
+                    .frame(width: max(6, proxy.size.width * min(1, max(0, (percent ?? 0) / 100))))
             }
         }
-        .frame(height: 5)
+        .frame(height: 6)
     }
 }
 
-private struct UsageRing: View {
-    let percent: Double?
+/// Colours and icons per provider. The icons are the ones Droppy ships for its
+/// own Agents droplet, read from Droppy's bundle since the droplet runs in it;
+/// in the harness they are absent and a monogram stands in.
+@MainActor
+enum ProviderStyle {
+    private static var images: [String: NSImage] = [:]
+
+    static func key(_ provider: String) -> String? {
+        let id = provider.lowercased()
+        if id.contains("claude") || id.contains("anthropic") { return "claude" }
+        if id.contains("codex") || id.contains("openai") || id.contains("chatgpt") { return "codex" }
+        if id.contains("cursor") { return "cursor" }
+        if id.contains("opencode") { return "opencode" }
+        if id.contains("antigravity") { return "antigravity" }
+        return nil
+    }
+
+    static func color(_ provider: String) -> Color {
+        switch key(provider) {
+        case "claude": return Color(red: 0.88, green: 0.54, blue: 0.36)
+        case "codex": return Color(red: 0.36, green: 0.56, blue: 0.97)
+        case "antigravity": return Color(red: 0.38, green: 0.62, blue: 1)
+        default: return AdaptiveColors.notchSurfacePrimaryText.opacity(0.85)
+        }
+    }
+
+    static func image(_ provider: String) -> NSImage? {
+        guard let key = key(provider) else { return nil }
+        if let cached = images[key] { return cached }
+        let image = Bundle.main
+            .url(forResource: "ai-assistant-\(key)", withExtension: "png", subdirectory: "ExtensionMedia")
+            .flatMap(NSImage.init(contentsOf:))
+        images[key] = image
+        return image
+    }
+}
+
+private struct ProviderIcon: View {
+    let provider: String
+    let name: String
+    let size: CGFloat
 
     var body: some View {
-        ZStack {
-            Circle().stroke(AdaptiveColors.notchSurfacePrimaryText.opacity(0.12), lineWidth: 4)
-            Circle()
-                .trim(from: 0, to: min(1, max(0, (percent ?? 0) / 100)))
-                .stroke(Formatting.usageColor(percent), style: StrokeStyle(lineWidth: 4, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            Text(verbatim: percent.map { "\(Int($0))%" } ?? "–")
-                .font(.system(size: 11, weight: .semibold))
-                .monospacedDigit()
-                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+        if let image = ProviderStyle.image(provider) {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+        } else {
+            Text(verbatim: String(name.prefix(1)).uppercased())
+                .font(.system(size: size * 0.5, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .background(ProviderStyle.color(provider).opacity(0.85), in: RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
         }
-        .frame(width: 44, height: 44)
     }
 }
 
@@ -579,19 +734,18 @@ struct PermissionCard: View {
 }
 
 struct UsageStrip: View {
+    let provider: String
     let percent: Double
     let label: String
 
     var body: some View {
         HStack(spacing: 0) {
-            Image(systemName: "gauge.with.dots.needle.67percent")
-                .font(.system(size: DroppyLiveActivityMetrics.iconSize, weight: .semibold))
-                .foregroundStyle(Formatting.usageColor(percent))
+            ProviderIcon(provider: provider, name: label, size: DroppyLiveActivityMetrics.iconSize + 2)
             Spacer(minLength: 0)
             Text(verbatim: "\(Int(percent))%")
                 .font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .semibold))
                 .monospacedDigit()
-                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .foregroundStyle(Formatting.usageColor(percent))
                 .accessibilityLabel(label)
         }
         .frame(maxWidth: .infinity)
@@ -613,7 +767,7 @@ struct MenuBarSummary: View {
                     .font(.system(size: 13))
             }
             if let (provider, window) = droplet.usage.compactMap({ p in p.tightest.map { (p, $0) } }).first {
-                Text(verbatim: "\(provider.name) \(window.name): \(window.usedPercent.map { "\(Int($0))%" } ?? "–")")
+                Text(verbatim: "\(provider.name) \(Formatting.windowLabel(window, in: provider)): \(window.usedPercent.map { "\(Int($0))%" } ?? "–")")
                     .font(.system(size: 12))
                     .foregroundStyle(AdaptiveColors.secondaryTextAuto)
             }

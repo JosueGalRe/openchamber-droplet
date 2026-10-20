@@ -43,8 +43,14 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         var route: String?
     }
 
-    static let sessionsWidgetID: ShelfWidgetID = "sessions"
-    static let usageWidgetID: ShelfWidgetID = "usage"
+    /// The widget's two pages, switched from its header like Agents' Progress and Usage.
+    enum WidgetTab: String, Codable {
+        case sessions, usage
+    }
+
+    /// Kept from when sessions and usage were two widgets, so the one widget
+    /// takes the sessions widget's place on the shelf.
+    static let widgetID: ShelfWidgetID = "sessions"
 
     @Published private(set) var servers: [ChamberServer] = []
     @Published private(set) var serverStates: [String: ServerState] = [:]
@@ -52,6 +58,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     @Published private(set) var state = ActivityState()
     @Published private(set) var phase: ActivityPhase = .idle
     @Published private(set) var seat: DropletLiveActivitySeat = .none(.idle)
+    @Published private(set) var tab: WidgetTab = .sessions
 
     private(set) var host: DropletHost?
     private var clients: [String: OpenChamberClient] = [:]
@@ -68,6 +75,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     public func activate(host: DropletHost) throws {
         self.host = host
+        tab = host.preferences.value(forKey: "tab", default: WidgetTab.sessions)
         if host.environment.isHarness {
             loadSample()
         } else {
@@ -105,6 +113,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     var warnsAboutUsage: Bool {
         host?.preferences.value(forKey: "usageWarnings", default: true) ?? true
+    }
+
+    func select(_ tab: WidgetTab) {
+        self.tab = tab
+        host?.preferences.setValue(tab, forKey: "tab")
     }
 
     func setPreference<Value: Codable>(_ value: Value, forKey key: String) {
@@ -147,7 +160,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     var usage: [ProviderQuota] {
         servers.flatMap { server in
             (serverStates[server.id]?.usage ?? []).map { quota in
-                server.isLocal ? quota : ProviderQuota(id: "\(server.id).\(quota.id)", name: "\(quota.name) · \(server.label)", plan: quota.plan, windows: quota.windows)
+                guard !server.isLocal else { return quota }
+                return ProviderQuota(
+                    id: "\(server.id).\(quota.id)", provider: quota.provider, name: quota.name,
+                    plan: quota.plan, server: server.label, windows: quota.windows
+                )
             }
         }
     }
@@ -334,7 +351,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 isInteractive: false,
                 joinsPersistentActivitySet: true,
                 compactPresentation: nil,
-                expandedWidgetID: Self.sessionsWidgetID.rawValue
+                expandedWidgetID: Self.widgetID.rawValue
             ))
             lockScreenSubject.send(LockScreenStatusEntry(
                 id: "openchamber.phase",
@@ -376,6 +393,8 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         guard showsPermissionCards, let host else { return }
         for permission in state.permissions where !announcedPermissions.contains(permission.id) {
             announcedPermissions.insert(permission.id)
+            // A request must not wait behind the usage page.
+            if tab != .sessions { tab = .sessions }
             let session = state.sessions[permission.sessionID]
             let request = DropletHUDRequest(
                 id: hudID(permission.id),
@@ -443,11 +462,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             for window in provider.windows {
                 guard let used = window.usedPercent,
                       let threshold = [95.0, 80.0].first(where: { used >= $0 }) else { continue }
-                let key = "\(provider.id).\(window.name).\(Int(threshold)).\(window.resetAt?.timeIntervalSince1970 ?? 0)"
+                let key = "\(provider.id).\(window.id).\(Int(threshold)).\(window.resetAt?.timeIntervalSince1970 ?? 0)"
                 guard usageWarnings.insert(key).inserted else { continue }
-                let label = "\(provider.name) \(window.name) at \(Int(used))%"
-                _ = host.hud.present(DropletHUDRequest(id: "openchamber.usage", duration: 4, accessibilityLabel: label) {
-                    UsageStrip(percent: used, label: "\(provider.name) \(window.name)")
+                let name = "\(provider.name) \(Formatting.windowLabel(window, in: provider))"
+                _ = host.hud.present(DropletHUDRequest(id: "openchamber.usage", duration: 4, accessibilityLabel: "\(name) at \(Int(used))%") {
+                    UsageStrip(provider: provider.provider, percent: used, label: name)
                 })
             }
         }
@@ -526,34 +545,21 @@ extension OpenchamberDroplet: ShelfWidgetProviding {
     public var widgetDescriptors: [ShelfWidgetDescriptor] {
         [
             ShelfWidgetDescriptor(
-                id: Self.sessionsWidgetID,
+                id: Self.widgetID,
                 title: "OpenChamber",
                 systemImage: "cube",
                 layoutTraits: ShelfWidgetLayoutTraits(
                     preferredSoloWidth: 440,
-                    preferredPairedWidth: 220,
+                    preferredPairedWidth: 240,
                     contentHeight: .fixed(176)
                 ),
-                searchKeywords: ["opencode", "agent", "session", "permission", "approve"]
-            ),
-            ShelfWidgetDescriptor(
-                id: Self.usageWidgetID,
-                title: "OpenChamber usage",
-                systemImage: "gauge.with.dots.needle.50percent",
-                layoutTraits: ShelfWidgetLayoutTraits(
-                    preferredSoloWidth: 360,
-                    preferredPairedWidth: 220,
-                    contentHeight: .fixed(150)
-                ),
-                searchKeywords: ["quota", "limit", "plan", "claude", "codex", "usage"]
+                searchKeywords: ["opencode", "agent", "session", "permission", "approve", "quota", "usage", "claude", "codex"]
             ),
         ]
     }
 
     public func makeWidgetView(_ id: ShelfWidgetID, context: ShelfWidgetContext) -> AnyView {
-        id == Self.usageWidgetID
-            ? AnyView(UsageWidget(droplet: self, context: context))
-            : AnyView(SessionsWidget(droplet: self, context: context))
+        AnyView(OpenchamberWidget(droplet: self, context: context))
     }
 }
 
@@ -618,9 +624,13 @@ private extension OpenchamberDroplet {
             directory: "/Users/me/projects/openchamber-droplet"
         )))
         local.usage = [
-            ProviderQuota(id: "claude", name: "Claude", plan: "Max", windows: [
-                QuotaWindow(name: "5h", usedPercent: 82, windowSeconds: 18_000, resetAt: now.addingTimeInterval(4_320)),
-                QuotaWindow(name: "7d", usedPercent: 38, windowSeconds: 604_800, resetAt: now.addingTimeInterval(273_600)),
+            ProviderQuota(id: "claude", provider: "claude", name: "Claude", plan: "Max (5x)", windows: [
+                QuotaWindow(name: "5h", usedPercent: 3, windowSeconds: 18_000, resetAt: now.addingTimeInterval(15_660)),
+                QuotaWindow(name: "7d", usedPercent: 7, windowSeconds: 604_800, resetAt: now.addingTimeInterval(518_400)),
+                QuotaWindow(name: "7d", model: "Fable", usedPercent: 0, windowSeconds: 604_800, resetAt: now.addingTimeInterval(518_400)),
+            ]),
+            ProviderQuota(id: "opencode-go", provider: "opencode-go", name: "OpenCode Go", plan: nil, windows: [
+                QuotaWindow(name: "monthly", usedPercent: 3, windowSeconds: 2_592_000, resetAt: now.addingTimeInterval(1_900_000)),
             ]),
         ]
 
@@ -628,8 +638,8 @@ private extension OpenchamberDroplet {
         work.activity.apply(.sessionsListed([SessionInfo(id: "w1", title: "Kiro migration", directory: "/home/bryan/work/api", parentID: nil)]))
         work.activity.apply(.executionStarted(sessionID: "w1", at: now.addingTimeInterval(-610)))
         work.usage = [
-            ProviderQuota(id: "codex", name: "Codex", plan: "Pro", windows: [
-                QuotaWindow(name: "5h", usedPercent: 21, windowSeconds: 18_000, resetAt: now.addingTimeInterval(9_600)),
+            ProviderQuota(id: "codex", provider: "codex", name: "Codex", plan: "Pro", windows: [
+                QuotaWindow(name: "5h", usedPercent: 0, windowSeconds: 18_000, resetAt: now.addingTimeInterval(9_600)),
             ]),
         ]
         serverStates = [mac.id: local, remote.id: work]

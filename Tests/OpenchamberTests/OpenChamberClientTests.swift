@@ -73,3 +73,30 @@ private var relay: [String: Any] { [
     }
     #expect(reset)
 }
+
+@Test func claudeUsageKeepsItsPerModelWindowsAndReadsLikeAgents() throws {
+    let body: [String: Any] = [
+        "ok": true, "providerName": "Claude", "planLabel": "Max (5x)",
+        "usage": [
+            "windows": [
+                "7d": ["usedPercent": 7, "windowSeconds": 604_800, "resetAt": 1_800_500_000_000],
+                "5h": ["usedPercent": 3, "windowSeconds": 18_000, "resetAt": 1_800_015_660_000],
+            ],
+            "models": ["Fable": ["windows": ["7d": ["usedPercent": 0, "windowSeconds": 604_800]]]],
+        ],
+    ]
+    let quota = try #require(OpenChamberClient.quota(from: body, providerID: "claude"))
+
+    #expect(quota.windows.map(\.id) == [".5h", ".7d", "Fable.7d"])
+    #expect(quota.windows.map { Formatting.windowLabel($0, in: quota) } == ["5-hour limit", "Weekly · all models", "Weekly · Fable"])
+    #expect(quota.percentLeft == 93)
+    #expect(OpenChamberClient.quota(from: ["ok": false], providerID: "claude") == nil)
+}
+
+@Test func resetsReadInHoursWithinADayAndAsADateAfter() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    #expect(Formatting.resetText(now.addingTimeInterval(15_660), now: now) == "Resets in 4 hr 21 min")
+    #expect(Formatting.resetText(now.addingTimeInterval(1_200), now: now) == "Resets in 20 min")
+    #expect(Formatting.resetText(now.addingTimeInterval(-1), now: now) == "Resetting")
+    #expect(!Formatting.resetText(now.addingTimeInterval(518_400), now: now).contains("Resets"))
+}
