@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "droppykit": {
+      "command": "/Users/josuegalre/projects/personal/droppykit/Scripts/droppykit",
+      "args": [
+        "mcp",
+        "--package",
+        "/Users/josuegalre/projects/personal/openchamber-droplet"
+      ]
+    }
+  }
+}

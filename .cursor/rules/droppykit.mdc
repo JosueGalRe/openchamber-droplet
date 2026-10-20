@@ -1,0 +1,8 @@
+---
+description: OpenChamber is a Droplet for Droppy, built with DroppyKit. The brief, the build loop and the rules live in AGENTS.md at the package root.
+alwaysApply: true
+---
+
+Read `AGENTS.md` at the package root before changing anything in this package. It carries the loop (`droppykit build`, `droppykit validate`, `droppykit run -- --shots ./shots --report ./shots/report.json`), the rules a droplet must follow, and the on-disk paths of the DroppyKit guides and sources under `/Users/josuegalre/projects/personal/droppykit`.
+
+Never build the bundle with a bare `swift build`; only `droppykit build` produces one Droppy can load. Never make, draw or replace the droplet's icon: Jordy designs every Store droplet's icon, and `Openchamber.icon` is a placeholder for the harness that `droppykit submit` leaves out. Keep `droplet.json` `surfaces` and the droplet's protocol conformances in agreement. After every visual change render the shots and look at them: the DroppyKit MCP server in `.cursor/mcp.json` returns them inline through `droppykit_shots`, and `droppykit_install` puts the bundle into Droppy Playground and reports whether it loaded.

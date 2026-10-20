@@ -1,0 +1,31 @@
+{
+  "id": "openchamber",
+  "name": "OpenChamber",
+  "version": "1.0.0",
+  "summary": "One line about OpenChamber",
+  "description": "A longer description, in plain paragraphs.",
+  "category": "Productivity",
+  "kit": {
+    "abi": 1,
+    "minAPI": "1.6.0"
+  },
+  "minAppVersion": "15.3.0",
+  "capabilities": [],
+  "surfaces": [
+    "shelf-widget"
+  ],
+  "icon": "Openchamber.icon",
+  "creator": {
+    "name": "Your name",
+    "kind": "community",
+    "url": "https://example.com",
+    "avatar": "Creator.png",
+    "gitlab": "your-gitlab-username"
+  },
+  "source": {
+    "repository": "https://gitlab.com/droppyformac1/droplets/-/tree/main/droplets/openchamber",
+    "license": "MIT"
+  },
+  "screenshots": [],
+  "keywords": []
+}
