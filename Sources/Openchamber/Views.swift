@@ -735,7 +735,7 @@ private struct RingTile: View {
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                Text(verbatim: "\(Int(left.rounded()))% left")
+                Text(verbatim: provider.caption)
                     .font(.system(size: diameter < 48 ? 11 : 12))
                     .monospacedDigit()
                     .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
@@ -744,7 +744,7 @@ private struct RingTile: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(provider.name), \(Int(left.rounded())) percent left")
+        .accessibilityLabel("\(provider.name), \(provider.caption)")
         .onHover { overRing = $0; hoverChanged() }
         .popover(isPresented: Binding(get: { showsDetail }, set: { setDetail($0) }), arrowEdge: .bottom) {
             UsageDetail(droplet: droplet, provider: provider)

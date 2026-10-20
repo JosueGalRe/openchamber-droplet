@@ -139,7 +139,26 @@ struct ProviderQuota: Equatable, Sendable, Identifiable {
     /// The window closest to running out.
     var tightest: QuotaWindow? { windows.max { ($0.usedPercent ?? 0) < ($1.usedPercent ?? 0) } }
     /// What is left of the tightest window, the number Agents puts under its ring.
-    var percentLeft: Double? { tightest?.usedPercent.map { max(0, 100 - $0) } }
+    var percentLeft: Double? {
+        windows.compactMap(\.usedPercent).max().map { max(0, 100 - $0) }
+    }
+
+    /// What goes under the ring: "93% left", or a plan's own word for it
+    /// ("Unlimited") when no window has a percentage.
+    var caption: String {
+        if let left = percentLeft { return "\(Int(left.rounded()))% left" }
+        return windows.compactMap(\.valueLabel).first ?? "–"
+    }
+
+    /// One server's providers, without the ones that repeat another's windows
+    /// exactly: OpenChamber lists Copilot twice (`github-copilot` and
+    /// `github-copilot-addon` read the same quota), and two rings with the
+    /// same numbers read as two accounts.
+    static func distinct(_ quotas: [ProviderQuota]) -> [ProviderQuota] {
+        quotas.reduce(into: []) { kept, quota in
+            if !kept.contains(where: { $0.windows == quota.windows }) { kept.append(quota) }
+        }
+    }
 }
 
 /// One frame of the global event stream, already lifted out of JSON.

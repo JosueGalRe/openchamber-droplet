@@ -120,3 +120,18 @@ private var relay: [String: Any] { [
     #expect(ProviderStyle.displayName("openai") == "OpenAI")
     #expect(ProviderStyle.displayName("") == "OpenChamber")
 }
+
+@Test func copilotsTwinQuotaShowsOnceAndUnlimitedSaysSo() {
+    let reset = Date(timeIntervalSince1970: 1_801_000_000)
+    let premium = [QuotaWindow(name: "premium_interactions", usedPercent: nil, windowSeconds: nil, resetAt: reset, valueLabel: "Unlimited")]
+    let copilot = ProviderQuota(id: "github-copilot", provider: "github-copilot", name: "GitHub Copilot", plan: nil, windows: premium)
+    let addon = ProviderQuota(id: "github-copilot-addon", provider: "github-copilot-addon", name: "GitHub Copilot Add-on", plan: nil, windows: premium)
+    let claude = ProviderQuota(id: "claude", provider: "claude", name: "Claude", plan: nil, windows: [
+        QuotaWindow(name: "5h", usedPercent: 20, windowSeconds: 18_000, resetAt: reset),
+    ])
+
+    #expect(ProviderQuota.distinct([claude, copilot, addon]).map(\.id) == ["claude", "github-copilot"])
+    #expect(copilot.caption == "Unlimited")
+    #expect(copilot.percentLeft == nil)
+    #expect(claude.caption == "80% left")
+}

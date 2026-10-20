@@ -445,7 +445,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             for id in ids {
                 if let quota = try? await client.quota(providerID: id) { results.append(quota) }
             }
-            serverStates[serverID]?.usage = results
+            serverStates[serverID]?.usage = ProviderQuota.distinct(results)
             serverStates[serverID]?.usageFetchedAt = Date()
             warnAboutUsage()
             scheduleBusyUsageRefresh(on: serverID)
