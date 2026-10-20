@@ -15,6 +15,9 @@ struct SessionInfo: Equatable, Sendable {
     var title: String
     var directory: String
     var parentID: String?
+    /// The session's model, as OpenCode records it: `anthropic`, `openai`, `opencode`, …
+    var providerID: String? = nil
+    var modelID: String? = nil
 
     /// The folder name, which is how OpenChamber's sidebar names a project.
     var project: String { (directory as NSString).lastPathComponent }
@@ -47,6 +50,8 @@ struct SessionActivity: Equatable, Sendable {
     var calls: [ToolCall] = []
     var finishedAt: Date?
     var failedAt: Date?
+    /// The assistant's latest finished block of text in this turn.
+    var lastText: String?
 
     var isBusy: Bool { busySince != nil }
     /// The call the session is in, if it is in one.
@@ -85,6 +90,7 @@ enum ActivityEvent: Equatable, Sendable {
     case toolStarted(sessionID: String, callID: String, name: String)
     case toolCalled(sessionID: String, callID: String, name: String?, target: String?)
     case toolFinished(sessionID: String, callID: String, succeeded: Bool)
+    case textEnded(sessionID: String, text: String)
     case permissionAsked(PendingPermission)
     case permissionSettled(sessionID: String, requestID: String)
     case formCreated(PendingForm)
@@ -196,6 +202,8 @@ struct ActivityState: Equatable, Sendable {
             session.retry = nil
             session.failedAt = nil
             session.finishedAt = nil
+            // A new turn: last turn's words no longer describe what it is doing.
+            session.lastText = nil
             activity[id] = session
 
         case let .executionEnded(id, outcome, at):
@@ -230,6 +238,9 @@ struct ActivityState: Equatable, Sendable {
         case let .toolFinished(id, callID, succeeded):
             guard let index = activity[id]?.calls.firstIndex(where: { $0.id == callID }) else { return }
             activity[id]?.calls[index].mark = succeeded ? .succeeded : .failed
+
+        case let .textEnded(id, text):
+            activity[id, default: SessionActivity()].lastText = text
 
         case let .permissionAsked(permission):
             guard !permissions.contains(where: { $0.id == permission.id }) else { return }
@@ -321,6 +332,10 @@ enum ActivityWire {
             guard let sessionID, let callID = data["id"] as? String else { return nil }
             let input = data["input"] as? [String: Any] ?? [:]
             return .toolCalled(sessionID: sessionID, callID: callID, name: data["name"] as? String, target: target(of: input))
+        case "session.text.ended":
+            guard let sessionID, let text = (data["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else { return nil }
+            return .textEnded(sessionID: sessionID, text: text)
         case "session.tool.success", "session.tool.failed":
             guard let sessionID, let callID = data["id"] as? String else { return nil }
             return .toolFinished(sessionID: sessionID, callID: callID, succeeded: type == "session.tool.success")
@@ -368,7 +383,15 @@ enum ActivityWire {
             ?? record["directory"] as? String
             ?? ""
         let title = (record["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "Untitled session"
-        return SessionInfo(id: id, title: title, directory: directory, parentID: record["parentID"] as? String)
+        let model = record["model"] as? [String: Any]
+        return SessionInfo(
+            id: id,
+            title: title,
+            directory: directory,
+            parentID: record["parentID"] as? String,
+            providerID: model?["providerID"] as? String,
+            modelID: model?["id"] as? String
+        )
     }
 
     static func permission(from data: [String: Any], directory: String?) -> PendingPermission? {
@@ -392,7 +415,10 @@ enum ActivityWire {
         if let path = input["filePath"] as? String ?? input["path"] as? String {
             return (path as NSString).lastPathComponent
         }
-        if let command = input["command"] as? String { return command }
+        // A command's first line: a heredoc's body is not something to read in a notch.
+        if let command = input["command"] as? String {
+            return command.split(separator: "\n", maxSplits: 1).first.map(String.init) ?? command
+        }
         if let url = input["url"] as? String { return URL(string: url)?.host ?? url }
         if let pattern = input["pattern"] as? String ?? input["query"] as? String { return pattern }
         return input["description"] as? String

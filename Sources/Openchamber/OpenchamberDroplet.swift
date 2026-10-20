@@ -607,8 +607,8 @@ private extension OpenchamberDroplet {
 
         var local = ServerState(connection: .live)
         local.activity.apply(.sessionsListed([
-            SessionInfo(id: "s1", title: "Fix notification title cache", directory: "/Users/me/projects/openchamber", parentID: nil),
-            SessionInfo(id: "s2", title: "Design the droplet", directory: "/Users/me/projects/openchamber-droplet", parentID: nil),
+            SessionInfo(id: "s1", title: "Fix notification title cache", directory: "/Users/me/projects/openchamber", parentID: nil, providerID: "anthropic", modelID: "claude-opus-5-5"),
+            SessionInfo(id: "s2", title: "Design the droplet", directory: "/Users/me/projects/openchamber-droplet", parentID: nil, providerID: "anthropic"),
         ]))
         local.activity.apply(.executionStarted(sessionID: "s1", at: now.addingTimeInterval(-252)))
         for (index, mark) in [true, true, false, true, true].enumerated() {
@@ -617,6 +617,7 @@ private extension OpenchamberDroplet {
         }
         local.activity.apply(.toolStarted(sessionID: "s1", callID: "c9", name: "edit"))
         local.activity.apply(.toolCalled(sessionID: "s1", callID: "c9", name: nil, target: "session-runtime.js"))
+        local.activity.apply(.textEnded(sessionID: "s1", text: "23/23. Build, validate y shots del tab Sessions; luego del de Usage."))
         local.activity.apply(.executionStarted(sessionID: "s2", at: now.addingTimeInterval(-48)))
         local.activity.apply(.permissionAsked(PendingPermission(
             id: "p1", sessionID: "s2", action: "bash",

@@ -169,14 +169,25 @@ struct OpenchamberWidget: View {
 
     private var buttonSize: CGFloat { context.isCompact ? 24 : 28 }
 
+    /// The session the page follows: the one that started last.
+    private var primarySessionID: String? { state.busySessionIDs.last }
+
     @ViewBuilder private var full: some View {
         if let permission = state.permissions.first {
             PermissionTile(droplet: droplet, permission: permission, more: state.pendingCount - 1)
+            if let id = primarySessionID { SessionRow(droplet: droplet, sessionID: id) }
         } else if let form = state.forms.first {
             FormTile(droplet: droplet, form: form, session: state.sessions[form.sessionID])
-        }
-        ForEach(Array(state.busySessionIDs.prefix(state.pendingCount > 0 ? 1 : 3)), id: \.self) { id in
-            SessionRow(droplet: droplet, sessionID: id)
+            if let id = primarySessionID { SessionRow(droplet: droplet, sessionID: id) }
+        } else if let id = primarySessionID {
+            SessionProgress(droplet: droplet, sessionID: id, compact: false)
+            let others = state.busySessionIDs.dropLast()
+            if !others.isEmpty {
+                Text(verbatim: "+\(others.count) more · " + others.compactMap { state.sessions[$0]?.title }.joined(separator: ", "))
+                    .font(.system(size: 11))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    .lineLimit(1)
+            }
         }
     }
 
@@ -196,13 +207,9 @@ struct OpenchamberWidget: View {
                 }
                 .frame(height: 28)
             }
-        case let .working(sessions, since):
-            TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                BigFigure(
-                    value: Formatting.elapsed(timeline.date.timeIntervalSince(since)),
-                    label: sessions == 1 ? "working" : "\(sessions) working",
-                    color: AdaptiveColors.notchSurfacePrimaryText
-                )
+        case .working:
+            if let id = primarySessionID {
+                SessionProgress(droplet: droplet, sessionID: id, compact: true)
             }
         case .failed:
             BigFigure(value: "!", label: "a session failed", color: .red)
@@ -408,6 +415,120 @@ private struct FormTile: View {
         }
         .padding(DroppySpacing.sm)
         .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
+    }
+}
+
+/// One session the way Agents shows one: who is working and on what, the last
+/// tool calls with their outcome, and what the assistant last said.
+private struct SessionProgress: View {
+    let droplet: OpenchamberDroplet
+    let sessionID: String
+    let compact: Bool
+
+    var body: some View {
+        let session = droplet.state.sessions[sessionID]
+        let activity = droplet.state.activity[sessionID] ?? SessionActivity()
+        let provider = session?.providerID ?? ""
+        let accent = ProviderStyle.accent(provider)
+        let title = session?.title ?? "Session"
+        HStack(alignment: .top, spacing: DroppySpacing.md) {
+            VStack(alignment: .leading, spacing: compact ? 4 : 6) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    AgentMark(provider: provider, size: compact ? 18 : 22)
+                    Text(ProviderStyle.displayName(provider))
+                        .font(.system(size: compact ? 13 : 15, weight: .bold))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                        .layoutPriority(1)
+                    if !compact {
+                        Circle().fill(accent).frame(width: 6, height: 6)
+                        Text(title)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(accent)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: DroppySpacing.sm)
+                    if let since = activity.busySince {
+                        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                            Text(verbatim: Formatting.elapsed(timeline.date.timeIntervalSince(since)))
+                                .font(.system(size: 12, weight: .medium))
+                                .monospacedDigit()
+                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        }
+                    }
+                }
+                if compact {
+                    Text(title)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(accent)
+                        .lineLimit(1)
+                }
+                ForEach(activity.calls.suffix(compact ? 2 : 3), id: \.id) { call in
+                    CallRow(call: call, accent: accent, compact: compact)
+                }
+            }
+            if !compact, let text = activity.lastText {
+                Text(text)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .lineLimit(4)
+                    .padding(DroppySpacing.md)
+                    .frame(maxWidth: 180, alignment: .leading)
+                    .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.large, style: .continuous))
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { droplet.openSession(sessionID) }
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// The provider's icon when Droppy has one, else OpenChamber's cube.
+private struct AgentMark: View {
+    let provider: String
+    let size: CGFloat
+
+    var body: some View {
+        if ProviderStyle.image(provider) != nil {
+            ProviderIcon(provider: provider, name: provider, size: size)
+        } else {
+            ChamberGlyph(motion: .still, size: size)
+        }
+    }
+}
+
+/// `✓ read  formatters.js`, `▶ bash  swift test`, `✗ edit  Views.swift`.
+private struct CallRow: View {
+    let call: ToolCall
+    let accent: Color
+    let compact: Bool
+
+    var body: some View {
+        HStack(spacing: DroppySpacing.xsm) {
+            Image(systemName: symbol)
+                .font(.system(size: compact ? 10 : 11, weight: .bold))
+                .foregroundStyle(call.mark == .failed ? Color.red : accent)
+                .frame(width: 14)
+            Text(call.name)
+                .font(.system(size: compact ? 12 : 13))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .lineLimit(1)
+                .layoutPriority(1)
+            if let target = call.target {
+                Text(target)
+                    .font(.system(size: compact ? 11 : 12))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+        }
+    }
+
+    private var symbol: String {
+        switch call.mark {
+        case .running: return "play.fill"
+        case .succeeded: return "checkmark"
+        case .failed: return "xmark"
+        }
     }
 }
 
@@ -629,6 +750,25 @@ enum ProviderStyle {
         if id.contains("opencode") { return "opencode" }
         if id.contains("antigravity") { return "antigravity" }
         return nil
+    }
+
+    /// What Agents calls the agent: the product, not the model id.
+    static func displayName(_ provider: String) -> String {
+        switch provider.lowercased() {
+        case "": return "OpenChamber"
+        case "anthropic", "claude": return "Claude"
+        case "openai": return "OpenAI"
+        case "codex": return "Codex"
+        case "opencode", "opencode-go": return "OpenCode"
+        case "google", "google-vertex": return "Gemini"
+        case "github-copilot": return "Copilot"
+        default: return provider.prefix(1).uppercased() + provider.dropFirst()
+        }
+    }
+
+    /// The session title's colour: the brand's, or OpenChamber's orange.
+    static func accent(_ provider: String) -> Color {
+        key(provider) == nil || key(provider) == "opencode" || key(provider) == "cursor" ? .orange : color(provider)
     }
 
     static func color(_ provider: String) -> Color {

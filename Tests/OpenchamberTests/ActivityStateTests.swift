@@ -126,3 +126,25 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(ActivityWire.date(fromMilliseconds: 1_800_000_000_000) == t0)
     #expect(ActivityWire.date(fromMilliseconds: 1_800_000_000) == t0)
 }
+
+@Test func theAssistantsLastWordsLastUntilTheNextTurn() {
+    var state = state(after: [
+        wire("session.execution.started", ["sessionID": "s1"]),
+        wire("session.text.ended", ["sessionID": "s1", "assistantMessageID": "m1", "ordinal": 0, "text": "  Looking at the reducer.\n"]),
+        wire("session.text.ended", ["sessionID": "s1", "assistantMessageID": "m1", "ordinal": 1, "text": "   "]),
+    ])
+    #expect(state.activity["s1"]?.lastText == "Looking at the reducer.")
+
+    state.apply(.executionStarted(sessionID: "s1", at: t0.addingTimeInterval(60)))
+    #expect(state.activity["s1"]?.lastText == nil)
+}
+
+@Test func aCommandShowsItsFirstLineOnly() {
+    #expect(ActivityWire.target(of: ["command": "python3 - file.swift <<'EOF'\nprint(1)\nEOF"]) == "python3 - file.swift <<'EOF'")
+}
+
+@Test func sessionRecordsCarryTheirModel() {
+    let info = ActivityWire.session(from: ["id": "s1", "title": "T", "location": ["directory": "/r/app"], "model": ["id": "claude-opus-5-5", "providerID": "anthropic"]])
+    #expect(info?.providerID == "anthropic")
+    #expect(info?.modelID == "claude-opus-5-5")
+}
