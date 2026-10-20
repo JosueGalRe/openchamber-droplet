@@ -448,22 +448,37 @@ struct UsageWidget: View {
         }
     }
 
+    /// The window closest to running out as a ring, and the next two as lines.
     @ViewBuilder private func compact(now: Date) -> some View {
-        let tightest = droplet.usage
-            .compactMap { provider in provider.tightest.map { (provider, $0) } }
-            .max { ($0.1.usedPercent ?? 0) < ($1.1.usedPercent ?? 0) }
-        if let (provider, window) = tightest {
-            HStack(spacing: DroppySpacing.md) {
-                UsageRing(percent: window.usedPercent)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: "\(provider.name) · \(window.name)")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                        .lineLimit(1)
-                    Text(verbatim: "resets in \(Formatting.countdown(to: window.resetAt, from: now))")
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+        let windows = droplet.usage
+            .flatMap { provider in provider.windows.map { (provider: provider, window: $0) } }
+            .sorted { ($0.window.usedPercent ?? 0) > ($1.window.usedPercent ?? 0) }
+        if let top = windows.first {
+            VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+                HStack(spacing: DroppySpacing.md) {
+                    UsageRing(percent: top.window.usedPercent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(verbatim: "\(top.provider.name) · \(top.window.name)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                            .lineLimit(1)
+                        Text(verbatim: "resets in \(Formatting.countdown(to: top.window.resetAt, from: now))")
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    }
+                }
+                ForEach(windows.dropFirst().prefix(2), id: \.window.id) { entry in
+                    HStack {
+                        Text(verbatim: "\(entry.provider.name) \(entry.window.name)")
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: DroppySpacing.md)
+                        Text(verbatim: entry.window.usedPercent.map { "\(Int($0))%" } ?? "–")
+                            .foregroundStyle(Formatting.usageColor(entry.window.usedPercent))
+                    }
+                    .font(.system(size: 11))
+                    .monospacedDigit()
                 }
             }
         }

@@ -492,7 +492,7 @@ extension OpenchamberDroplet: ShelfWidgetProviding {
                 layoutTraits: ShelfWidgetLayoutTraits(
                     preferredSoloWidth: 360,
                     preferredPairedWidth: 220,
-                    contentHeight: .fixed(176)
+                    contentHeight: .fixed(150)
                 ),
                 searchKeywords: ["quota", "limit", "plan", "claude", "codex", "usage"]
             ),
