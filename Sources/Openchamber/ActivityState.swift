@@ -52,10 +52,73 @@ struct SessionActivity: Equatable, Sendable {
     var failedAt: Date?
     /// The assistant's latest finished block of text in this turn.
     var lastText: String?
+    /// Tool calls in this turn, all of them; `calls` keeps only the last few.
+    var steps = 0
 
     var isBusy: Bool { busySince != nil }
     /// The call the session is in, if it is in one.
     var currentCall: ToolCall? { calls.last(where: { $0.mark == .running }) ?? (isBusy ? calls.last : nil) }
+
+    /// What the session is doing, in words, while it is busy.
+    var narration: Narration? {
+        if let running = calls.last(where: { $0.mark == .running }) { return Narration(call: running) }
+        return isBusy ? .thinking : nil
+    }
+}
+
+/// A tool call as a person would say it: "Editing Views.swift", "Running swift test".
+struct Narration: Equatable, Sendable {
+    let verb: String
+    let object: String?
+
+    static let thinking = Narration(verb: "Thinking…", object: nil)
+
+    init(verb: String, object: String?) {
+        self.verb = verb
+        self.object = object
+    }
+
+    init(call: ToolCall) {
+        var name = call.name.lowercased()
+        // `mcp__opencode__shell` is the `shell` tool of an MCP server.
+        if name.hasPrefix("mcp__"), let last = name.components(separatedBy: "__").last, !last.isEmpty { name = last }
+        switch name {
+        case "read", "view", "cat": self.init(verb: "Reading", object: call.target)
+        case "edit", "multiedit", "patch", "apply_patch", "str_replace": self.init(verb: "Editing", object: call.target)
+        case "write", "create": self.init(verb: "Writing", object: call.target)
+        case "bash", "shell", "exec", "run", "terminal": self.init(verb: "Running", object: call.target.flatMap(Self.command))
+        case "grep", "glob", "search", "find", "codesearch": self.init(verb: "Searching", object: call.target)
+        case "list", "ls": self.init(verb: "Listing", object: call.target)
+        case "webfetch", "fetch": self.init(verb: "Fetching", object: call.target)
+        case "websearch": self.init(verb: "Searching the web", object: nil)
+        case "task", "subagent", "agent": self.init(verb: "Delegating", object: call.target)
+        case "todowrite", "todoread", "todo", "plan": self.init(verb: "Planning", object: nil)
+        default: self.init(verb: "Using", object: name)
+        }
+    }
+
+    /// `swift test` out of `cd ~/x && swift test 2>&1 | tail`: the first part
+    /// that is not setup, as its program and subcommand, without flags,
+    /// redirections, pipes or heredocs.
+    static func command(_ line: String) -> String? {
+        let setup: Set = ["cd", "export", "source", ".", "set", "pushd", "env", "time", "sudo"]
+        let parts = line
+            .components(separatedBy: ";")
+            .flatMap { $0.components(separatedBy: "&&") }
+            .flatMap { $0.components(separatedBy: "||") }
+        for part in parts {
+            var words: [String] = []
+            for token in part.split(separator: " ").map(String.init) {
+                if words.isEmpty, token.contains("="), !token.hasPrefix("-") { continue } // FOO=bar cmd
+                if token.hasPrefix("-") || token.contains(where: { "|<>&$(`\"'".contains($0) }) { break }
+                words.append(words.isEmpty ? (token as NSString).lastPathComponent : token)
+                if words.count == 2 { break }
+            }
+            guard let program = words.first, !setup.contains(program) else { continue }
+            return words.joined(separator: " ")
+        }
+        return nil
+    }
 }
 
 struct PendingPermission: Equatable, Identifiable, Sendable {
@@ -204,6 +267,7 @@ struct ActivityState: Equatable, Sendable {
             session.finishedAt = nil
             // A new turn: last turn's words no longer describe what it is doing.
             session.lastText = nil
+            session.steps = 0
             activity[id] = session
 
         case let .executionEnded(id, outcome, at):
@@ -280,6 +344,7 @@ struct ActivityState: Equatable, Sendable {
             var call = ToolCall(id: callID, name: "tool", target: nil, mark: .running)
             update(&call)
             session.calls.append(call)
+            session.steps += 1
             if session.calls.count > Self.recentCallLimit {
                 session.calls.removeFirst(session.calls.count - Self.recentCallLimit)
             }

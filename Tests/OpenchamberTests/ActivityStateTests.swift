@@ -148,3 +148,30 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(info?.providerID == "anthropic")
     #expect(info?.modelID == "claude-opus-5-5")
 }
+
+@Test func commandsReadAsTheirProgramAndSubcommand() {
+    #expect(Narration.command("cd ~/x && export PATH=a:$PATH; droppykit build 2>&1 | grep -E 'x'") == "droppykit build")
+    #expect(Narration.command("python3 -I - <<'EOF'") == "python3")
+    #expect(Narration.command("FOO=1 /usr/bin/swift test --filter liveRelay") == "swift test")
+    #expect(Narration.command("cd ~/projects") == nil)
+}
+
+@Test func toolCallsAreNarratedAndCountedPerTurn() {
+    var state = state(after: [
+        wire("session.execution.started", ["sessionID": "s1"]),
+        wire("session.tool.input.started", ["sessionID": "s1", "id": "c1", "name": "read"]),
+        wire("session.tool.called", ["sessionID": "s1", "id": "c1", "input": ["filePath": "/r/Views.swift"]]),
+        wire("session.tool.success", ["sessionID": "s1", "id": "c1"]),
+        wire("session.tool.input.started", ["sessionID": "s1", "id": "c2", "name": "mcp__opencode__shell"]),
+        wire("session.tool.called", ["sessionID": "s1", "id": "c2", "input": ["command": "cd ~/x && swift test 2>&1 | tail"]]),
+    ])
+    #expect(state.activity["s1"]?.narration == Narration(verb: "Running", object: "swift test"))
+    #expect(state.activity["s1"]?.steps == 2)
+
+    state.apply(ActivityWire.event(from: wire("session.tool.success", ["sessionID": "s1", "id": "c2"]), now: t0)!)
+    #expect(state.activity["s1"]?.narration == .thinking)
+    #expect(Narration(call: ToolCall(id: "x", name: "edit", target: "Views.swift", mark: .running)) == Narration(verb: "Editing", object: "Views.swift"))
+
+    state.apply(.executionStarted(sessionID: "s1", at: t0.addingTimeInterval(60)))
+    #expect(state.activity["s1"]?.steps == 0)
+}
