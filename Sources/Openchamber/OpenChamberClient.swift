@@ -120,6 +120,8 @@ struct QuotaWindow: Equatable, Sendable, Identifiable {
     let usedPercent: Double?
     let windowSeconds: Double?
     let resetAt: Date?
+    /// What a window without a percentage shows instead, such as a credit balance.
+    var valueLabel: String? = nil
 }
 
 struct ProviderQuota: Equatable, Sendable, Identifiable {
@@ -232,7 +234,8 @@ actor OpenChamberClient {
                         model: model,
                         usedPercent: (window["usedPercent"] as? NSNumber)?.doubleValue,
                         windowSeconds: (window["windowSeconds"] as? NSNumber)?.doubleValue,
-                        resetAt: ActivityWire.date(fromMilliseconds: window["resetAt"])
+                        resetAt: ActivityWire.date(fromMilliseconds: window["resetAt"]),
+                        valueLabel: window["valueLabel"] as? String
                     )
                 }
                 .sorted { ($0.windowSeconds ?? .infinity, $0.name) < ($1.windowSeconds ?? .infinity, $1.name) }

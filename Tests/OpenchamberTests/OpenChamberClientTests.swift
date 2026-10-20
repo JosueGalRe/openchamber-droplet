@@ -100,3 +100,16 @@ private var relay: [String: Any] { [
     #expect(Formatting.resetText(now.addingTimeInterval(-1), now: now) == "Resetting")
     #expect(!Formatting.resetText(now.addingTimeInterval(518_400), now: now).contains("Resets"))
 }
+
+@Test func ringsShrinkSoEveryProviderFitsAPairedWidget() {
+    let paired = RingLayout(count: 3, width: 224, compact: true)
+    #expect(paired.visible == 3)
+    #expect(paired.diameter >= 36 && paired.diameter <= 50)
+
+    let solo = RingLayout(count: 3, width: 424, compact: false)
+    #expect(solo.visible == 3)
+    #expect(solo.diameter == 62)
+
+    // Past the smallest readable ring, the rest are left out instead of shrinking further.
+    #expect(RingLayout(count: 8, width: 224, compact: true).visible == 3)
+}

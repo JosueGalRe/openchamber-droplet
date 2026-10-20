@@ -325,6 +325,12 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         _ = host?.workspace.open(url)
     }
 
+    /// Keeps the shelf open while a usage card hangs below it, so moving the
+    /// pointer into the card does not close the shelf under it.
+    func holdShelfOpen(_ holds: Bool) {
+        _ = host?.shelf.setHoldsOpen(holds)
+    }
+
     func openSettings() {
         _ = host?.workspace.openSettings()
     }

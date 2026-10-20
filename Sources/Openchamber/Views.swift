@@ -618,15 +618,16 @@ struct UsageRings: View {
     let context: ShelfWidgetContext
 
     var body: some View {
-        let providers = Array(droplet.usage.prefix(capacity))
+        let all = droplet.usage
+        let layout = RingLayout(count: all.count, width: context.availableSize.width, compact: context.isCompact)
         Group {
-            if providers.isEmpty {
+            if all.isEmpty {
                 WidgetMessage(text: droplet.connection == .live ? "No plan usage from OpenChamber yet." : "OpenChamber isn't reachable.")
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                HStack(alignment: .top, spacing: context.isCompact ? DroppySpacing.md : DroppySpacing.xl) {
-                    ForEach(providers) { provider in
-                        RingTile(droplet: droplet, provider: provider, diameter: context.isCompact ? 50 : 62)
+                HStack(alignment: .top, spacing: layout.spacing) {
+                    ForEach(all.prefix(layout.visible)) { provider in
+                        RingTile(droplet: droplet, provider: provider, diameter: layout.diameter, width: layout.tileWidth)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -636,9 +637,26 @@ struct UsageRings: View {
             if !context.isPreview { droplet.refreshUsage(ifOlderThan: 60) }
         }
     }
+}
 
-    private var capacity: Int {
-        max(1, Int(context.availableSize.width / (context.isCompact ? 84 : 100)))
+/// Rings shrink until every provider fits, down to a size that still reads;
+/// past that, the ones that do not fit are left out.
+struct RingLayout: Equatable {
+    let diameter: CGFloat
+    let tileWidth: CGFloat
+    let spacing: CGFloat
+    let visible: Int
+
+    init(count: Int, width: CGFloat, compact: Bool) {
+        let largest: CGFloat = compact ? 50 : 62
+        let smallest: CGFloat = 36
+        // A tile is its ring plus room for a label under it.
+        let labelRoom: CGFloat = 24
+        spacing = compact ? DroppySpacing.sm : DroppySpacing.lg
+        let fits = max(1, Int((width + spacing) / (smallest + labelRoom + spacing)))
+        visible = max(1, min(count, fits))
+        tileWidth = min(largest + labelRoom + 16, (width + spacing) / CGFloat(visible) - spacing)
+        diameter = min(largest, max(smallest, tileWidth - labelRoom))
     }
 }
 
@@ -646,12 +664,16 @@ private struct RingTile: View {
     let droplet: OpenchamberDroplet
     let provider: ProviderQuota
     let diameter: CGFloat
+    let width: CGFloat
     @State private var showsDetail = false
+    @State private var overRing = false
+    @State private var overCard = false
+    @State private var pending: Task<Void, Never>?
 
     var body: some View {
         let left = provider.percentLeft ?? 100
         let line = diameter * 0.085
-        Button { showsDetail.toggle() } label: {
+        Button { setDetail(!showsDetail) } label: {
             VStack(spacing: DroppySpacing.xs) {
                 ZStack {
                     Circle().stroke(AdaptiveColors.notchSurfacePrimaryText.opacity(0.12), lineWidth: line)
@@ -665,21 +687,46 @@ private struct RingTile: View {
                 .frame(width: diameter, height: diameter)
                 .padding(line / 2)
                 Text(provider.name)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: diameter < 48 ? 12 : 13, weight: .semibold))
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                 Text(verbatim: "\(Int(left.rounded()))% left")
-                    .font(.system(size: 12))
+                    .font(.system(size: diameter < 48 ? 11 : 12))
                     .monospacedDigit()
                     .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
             }
+            .frame(width: width)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(provider.name), \(Int(left.rounded())) percent left")
-        .popover(isPresented: $showsDetail, arrowEdge: .bottom) {
+        .onHover { overRing = $0; hoverChanged() }
+        .popover(isPresented: Binding(get: { showsDetail }, set: { setDetail($0) }), arrowEdge: .bottom) {
             UsageDetail(droplet: droplet, provider: provider)
+                .onHover { overCard = $0; hoverChanged() }
         }
+        .onDisappear { setDetail(false) }
+    }
+
+    /// Opens a beat after the pointer arrives, so sweeping across the rings
+    /// opens nothing, and closes a beat after it leaves both the ring and the
+    /// card, so crossing the gap between them keeps it open.
+    private func hoverChanged() {
+        pending?.cancel()
+        let wanted = overRing || overCard
+        guard wanted != showsDetail else { return }
+        pending = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(wanted ? 180 : 300))
+            guard !Task.isCancelled else { return }
+            setDetail(wanted)
+        }
+    }
+
+    private func setDetail(_ shown: Bool) {
+        guard shown != showsDetail else { return }
+        showsDetail = shown
+        droplet.holdShelfOpen(shown)
     }
 }
 
@@ -713,11 +760,13 @@ private struct UsageDetail: View {
                             Text(Formatting.resetText(window.resetAt, now: timeline.date))
                                 .font(.system(size: 13))
                                 .foregroundStyle(.secondary)
-                            Text(verbatim: window.usedPercent.map { "\(Int($0.rounded()))%" } ?? "–")
+                            Text(verbatim: window.usedPercent.map { "\(Int($0.rounded()))%" } ?? window.valueLabel ?? "–")
                                 .font(.system(size: 14, weight: .semibold))
                                 .monospacedDigit()
                         }
-                        UsageBar(percent: window.usedPercent, color: ProviderStyle.color(provider.provider))
+                        if window.usedPercent != nil {
+                            UsageBar(percent: window.usedPercent, color: ProviderStyle.color(provider.provider))
+                        }
                     }
                 }
             }

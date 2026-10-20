@@ -13,6 +13,7 @@
   "capabilities": [
     "network-client",
     "hud",
+    "shelf-write",
     "global-shortcuts",
     "lock-screen",
     "menu-bar"
