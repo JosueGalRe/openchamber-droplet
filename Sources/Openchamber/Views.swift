@@ -317,7 +317,7 @@ private struct SessionHero: View {
     /// Lines of the assistant's last words; a hero sharing the page gets fewer.
     var lastTextLines = 2
     /// Set when the hero was opened from the list: a tap folds it back, and
-    /// OpenChamber opens from its button instead.
+    /// OpenChamber opens only from its button.
     var collapse: (() -> Void)? = nil
 
     var body: some View {
@@ -336,14 +336,12 @@ private struct SessionHero: View {
                 if !compact {
                     ElapsedText(since: activity.busySince, size: 13)
                 }
-                if collapse != nil {
-                    Button { droplet.openSession(sessionID) } label: {
-                        Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold))
-                    }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
-                    .help("Open in OpenChamber")
-                    .accessibilityLabel("Open in OpenChamber")
+                Button { droplet.openSession(sessionID) } label: {
+                    Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold))
                 }
+                .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                .help("Open in OpenChamber")
+                .accessibilityLabel("Open in OpenChamber")
             }
             HStack(spacing: DroppySpacing.sm) {
                 NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13)
