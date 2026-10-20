@@ -131,7 +131,7 @@ struct CompactLabel: View {
         case .idle: return (nil, "", primary)
         case let .working(sessions, since):
             let elapsed = Formatting.elapsed(now.timeIntervalSince(since))
-            return (nil, sessions > 1 ? "\(sessions)·\(elapsed)" : elapsed, primary)
+            return (nil, sessions > 1 ? "\(sessions)\u{2009}·\u{2009}\(elapsed)" : elapsed, primary)
         case let .retrying(_, _, at): return ("arrow.clockwise", Formatting.elapsed(at.timeIntervalSince(now)), primary)
         case .finishing: return ("checkmark.circle.fill", "", .green)
         case let .waiting(count): return ("hand.raised.fill", "\(count)", .orange)
