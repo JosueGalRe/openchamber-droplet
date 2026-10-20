@@ -242,8 +242,8 @@ private struct TabButton: View {
             .buttonStyle(DroppyCircleButtonStyle(
                 size: size,
                 destructive: false,
-                solidFill: selected ? Color.green.opacity(0.22) : nil,
-                foregroundColorOverride: selected ? .green : nil
+                solidFill: selected ? Color.green.opacity(0.22) : AdaptiveColors.notchSurfaceCardFill,
+                foregroundColorOverride: selected ? .green : AdaptiveColors.notchSurfaceSecondaryText
             ))
             .help(label)
             .accessibilityLabel(label)
