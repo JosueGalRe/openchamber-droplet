@@ -132,135 +132,423 @@ struct CompactLabel: View {
 
 // MARK: - Widget
 
-/// The one widget: a Sessions page and a Usage page, switched from buttons in
-/// the header the way Droppy's Agents switches Progress and Usage.
+/// The one widget: a Sessions page and a Usage page. The header says how
+/// things stand; the switch at its end changes the page.
 struct OpenchamberWidget: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let context: ShelfWidgetContext
 
-    private var state: ActivityState { droplet.state }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
-            WidgetHeader(
-                symbol: droplet.tab == .sessions ? "checklist" : "gauge.with.dots.needle.33percent",
-                title: droplet.tab == .sessions ? "Sessions" : "Usage"
-            ) {
-                HStack(spacing: DroppySpacing.xsm) {
-                    TabButton(droplet: droplet, tab: .sessions, symbol: "checklist", label: "Sessions", size: buttonSize)
-                    TabButton(droplet: droplet, tab: .usage, symbol: "gauge.with.dots.needle.33percent", label: "Usage", size: buttonSize)
-                }
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            WidgetHeader(status: status) { PageSwitch(droplet: droplet) }
+                .padding(.bottom, DroppySpacing.smd)
             if droplet.connection == .noServers {
                 NoServersMessage(droplet: droplet)
                 Spacer(minLength: 0)
             } else if droplet.tab == .usage {
                 UsageRings(droplet: droplet, context: context)
-            } else if state.pendingCount == 0, state.busySessionIDs.isEmpty {
-                ServerTiles(droplet: droplet, context: context)
             } else {
-                if context.isCompact { compact } else { full }
-                Spacer(minLength: 0)
+                SessionsPage(droplet: droplet, context: context)
             }
         }
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
-    private var buttonSize: CGFloat { context.isCompact ? 24 : 28 }
+    private var status: HeaderStatus {
+        guard droplet.tab == .sessions else {
+            return HeaderStatus(symbol: "gauge.with.dots.needle.33percent", title: "Usage")
+        }
+        let busy = droplet.state.busySessionIDs.count
+        switch droplet.phase {
+        case let .waiting(count):
+            let running = busy > 0 && !context.isCompact ? " · \(busy) running" : ""
+            return HeaderStatus(symbol: "hand.raised.fill", title: (context.isCompact ? "Waiting" : "\(count) waiting") + running, tint: .orange)
+        case .working:
+            return HeaderStatus(symbol: "play.fill", title: busy == 1 ? "Working" : "\(busy) running")
+        case .retrying:
+            return HeaderStatus(symbol: "arrow.clockwise", title: "Retrying")
+        case .finishing:
+            return HeaderStatus(symbol: "checkmark", title: "Done", tint: .green)
+        case .failed:
+            return HeaderStatus(symbol: "exclamationmark.triangle.fill", title: "Failed", tint: .red)
+        case .idle:
+            return HeaderStatus(symbol: "checklist", title: "Sessions")
+        }
+    }
+}
+
+struct HeaderStatus: Equatable {
+    var symbol: String
+    var title: String
+    var tint: Color = AdaptiveColors.notchSurfaceSecondaryText
+}
+
+private struct WidgetHeader<Trailing: View>: View {
+    let status: HeaderStatus
+    @ViewBuilder let trailing: Trailing
+
+    var body: some View {
+        HStack(spacing: DroppySpacing.xsm) {
+            Image(systemName: status.symbol).font(.system(size: 11, weight: .semibold))
+            Text(status.title)
+                .font(.system(size: 12, weight: .semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+            Spacer(minLength: DroppySpacing.sm)
+            trailing
+        }
+        .foregroundStyle(status.tint)
+        .frame(height: 24)
+    }
+}
+
+/// Two small discs in one track, Droppy's own circle buttons: the page that
+/// is showing is green, as in Agents, at a size that leaves the header room.
+private struct PageSwitch: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+
+    var body: some View {
+        HStack(spacing: 2) {
+            segment(.sessions, symbol: "checklist", label: "Sessions")
+            segment(.usage, symbol: "gauge.with.dots.needle.33percent", label: "Usage")
+        }
+        .padding(2)
+        .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule())
+    }
+
+    private func segment(_ tab: OpenchamberDroplet.WidgetTab, symbol: String, label: String) -> some View {
+        let selected = droplet.tab == tab
+        return Button { droplet.select(tab) } label: {
+            Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
+        }
+        .buttonStyle(DroppyCircleButtonStyle(
+            size: 20,
+            destructive: false,
+            solidFill: selected ? Color.green.opacity(0.24) : Color.clear,
+            foregroundColorOverride: selected ? .green : AdaptiveColors.notchSurfaceTertiaryText
+        ))
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+// MARK: - Sessions page
+
+/// What waits on you first, then what is running; nothing at all becomes a
+/// tile per server.
+private struct SessionsPage: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+    let context: ShelfWidgetContext
+
+    private var state: ActivityState { droplet.state }
+
+    var body: some View {
+        let busy = state.busySessionIDs
+        if let permission = state.permissions.first {
+            ApprovalView(droplet: droplet, permission: permission, compact: context.isCompact)
+            if !context.isCompact, let other = busy.last(where: { $0 != permission.sessionID }) {
+                Spacer(minLength: DroppySpacing.sm)
+                SessionLine(droplet: droplet, sessionID: other, oneLine: true)
+            }
+        } else if let form = state.forms.first {
+            FormView(droplet: droplet, form: form, compact: context.isCompact)
+        } else if busy.count == 1 || (context.isCompact && !busy.isEmpty), let id = primary {
+            SessionHero(droplet: droplet, sessionID: id, compact: context.isCompact)
+        } else if busy.count > 1 {
+            VStack(alignment: .leading, spacing: DroppySpacing.smd) {
+                ForEach(busy.suffix(3).reversed(), id: \.self) { id in
+                    SessionLine(droplet: droplet, sessionID: id, oneLine: false)
+                }
+                Spacer(minLength: 0)
+                if busy.count > 3 {
+                    Text(verbatim: "+\(busy.count - 3) more")
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                }
+            }
+        } else if case let .failed(id) = droplet.phase {
+            SessionHero(droplet: droplet, sessionID: id, compact: context.isCompact)
+        } else {
+            ServerTiles(droplet: droplet, context: context)
+        }
+    }
 
     /// The session the page follows: one in a tool call right now, else one
     /// that has done something, else the one that started last.
-    private var primarySessionID: String? {
+    private var primary: String? {
         let busy = state.busySessionIDs
         return busy.last { state.activity[$0]?.calls.last?.mark == .running }
             ?? busy.last { state.activity[$0]?.calls.isEmpty == false }
             ?? busy.last
     }
-
-    @ViewBuilder private var full: some View {
-        if let permission = state.permissions.first {
-            PermissionTile(droplet: droplet, permission: permission, more: state.pendingCount - 1)
-            if let id = primarySessionID { SessionRow(droplet: droplet, sessionID: id) }
-        } else if let form = state.forms.first {
-            FormTile(droplet: droplet, form: form, session: state.sessions[form.sessionID])
-            if let id = primarySessionID { SessionRow(droplet: droplet, sessionID: id) }
-        } else if let id = primarySessionID {
-            SessionProgress(droplet: droplet, sessionID: id, compact: false)
-            let others = state.busySessionIDs.filter { $0 != id }
-            if !others.isEmpty {
-                Text(verbatim: "+\(others.count) more · " + others.compactMap { state.sessions[$0]?.title }.joined(separator: ", "))
-                    .font(.system(size: 11))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    .lineLimit(1)
-            }
-        }
-    }
-
-    @ViewBuilder private var compact: some View {
-        switch droplet.phase {
-        case let .waiting(count):
-            BigFigure(value: "\(count)", label: count == 1 ? "needs you" : "need you", color: .orange)
-            Spacer(minLength: 0)
-            if let oldest = state.permissions.first {
-                HStack(spacing: DroppySpacing.xsm) {
-                    Button("Allow once") { droplet.reply(to: oldest, decision: "once") }
-                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
-                    Spacer(minLength: 0)
-                    Button { droplet.openSession(oldest.sessionID) } label: { Image(systemName: "arrow.up.forward") }
-                        .buttonStyle(DroppyCircleButtonStyle(size: 24))
-                        .accessibilityLabel("Open in OpenChamber")
-                }
-                .frame(height: 28)
-            }
-        case .working:
-            if let id = primarySessionID {
-                SessionProgress(droplet: droplet, sessionID: id, compact: true)
-            }
-        case .failed:
-            BigFigure(value: "!", label: "a session failed", color: .red)
-        case .retrying, .finishing, .idle:
-            BigFigure(value: "\(state.busySessionIDs.count)", label: "active", color: AdaptiveColors.notchSurfacePrimaryText)
-        }
-    }
 }
 
-private struct WidgetHeader<Trailing: View>: View {
-    let symbol: String
-    let title: String
-    @ViewBuilder let trailing: Trailing
+/// One session, given the room: its title, what it is doing in words, its
+/// last words, and along the bottom the run of steps and who is doing it.
+private struct SessionHero: View {
+    let droplet: OpenchamberDroplet
+    let sessionID: String
+    let compact: Bool
 
     var body: some View {
-        HStack(spacing: DroppySpacing.xsm) {
-            Image(systemName: symbol).font(.system(size: 12, weight: .medium))
-            Text(title).font(.system(size: 12, weight: .semibold))
-            Spacer(minLength: 0)
-            trailing
+        let session = droplet.state.sessions[sessionID]
+        let activity = droplet.state.activity[sessionID] ?? SessionActivity()
+        let provider = session?.providerID ?? ""
+        let failed = droplet.phase == .failed(sessionID: sessionID)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: DroppySpacing.sm) {
+                AgentMark(provider: provider, size: compact ? 16 : 20)
+                Text(session?.title ?? "Session")
+                    .font(.system(size: compact ? 14 : 15, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .lineLimit(1)
+                if !compact {
+                    Spacer(minLength: DroppySpacing.md)
+                    ElapsedText(since: activity.busySince, size: 13)
+                }
+            }
+            HStack(spacing: DroppySpacing.sm) {
+                NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13)
+                if !compact {
+                    Spacer(minLength: DroppySpacing.md)
+                    Text(session?.project ?? "")
+                        .font(.system(size: 12))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.leading, compact ? 0 : 28)
+            .padding(.top, DroppySpacing.xs)
+
+            Spacer(minLength: DroppySpacing.sm)
+
+            if !compact, let text = activity.lastText {
+                Text(text)
+                    .font(.system(size: 12))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .lineLimit(2)
+                    .padding(.leading, DroppySpacing.sm)
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
+                    }
+                    .padding(.bottom, DroppySpacing.sm)
+            }
+
+            HStack(spacing: DroppySpacing.sm) {
+                CallStrip(calls: Array(activity.calls.suffix(compact ? 8 : 12)))
+                if !compact, activity.steps > 0 {
+                    Text(verbatim: activity.steps == 1 ? "1 step" : "\(activity.steps) steps")
+                        .font(.system(size: 12))
+                        .monospacedDigit()
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                }
+                Spacer(minLength: DroppySpacing.sm)
+                if compact {
+                    ElapsedText(since: activity.busySince, size: 13)
+                } else {
+                    Text([ProviderStyle.displayName(provider), droplet.serverLabel(forSession: sessionID)].compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 12))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+            }
         }
-        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+        .contentShape(Rectangle())
+        .onTapGesture { droplet.openSession(sessionID) }
+        .accessibilityAddTraits(.isButton)
     }
 }
 
-/// A page switch in the header: green while its page is showing, as in Agents.
-private struct TabButton: View {
-    @ObservedObject var droplet: OpenchamberDroplet
-    let tab: OpenchamberDroplet.WidgetTab
-    let symbol: String
-    let label: String
+/// A session in a list: title and time, then what it is doing.
+private struct SessionLine: View {
+    let droplet: OpenchamberDroplet
+    let sessionID: String
+    let oneLine: Bool
+
+    var body: some View {
+        let session = droplet.state.sessions[sessionID]
+        let activity = droplet.state.activity[sessionID] ?? SessionActivity()
+        let title = Text(session?.title ?? "Session")
+            .font(.system(size: 13, weight: oneLine ? .medium : .semibold))
+            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: DroppySpacing.sm) {
+                AgentMark(provider: session?.providerID ?? "", size: 16)
+                if oneLine {
+                    (title + Text(verbatim: activity.narration.map { "  " + $0.sentence } ?? "")
+                        .font(.system(size: 12))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText))
+                        .lineLimit(1)
+                } else {
+                    title.lineLimit(1)
+                }
+                Spacer(minLength: DroppySpacing.sm)
+                ElapsedText(since: activity.busySince, size: 12)
+            }
+            if !oneLine {
+                HStack(spacing: DroppySpacing.sm) {
+                    NarrationText(narration: activity.narration, failed: false, size: 12)
+                    Spacer(minLength: DroppySpacing.sm)
+                    Text([droplet.serverLabel(forSession: sessionID), session?.project].compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+                .padding(.leading, 24)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { droplet.openSession(sessionID) }
+        .accessibilityAddTraits(.isButton)
+    }
+}
+
+/// **Running** swift test.
+private struct NarrationText: View {
+    let narration: Narration?
+    let failed: Bool
     let size: CGFloat
 
     var body: some View {
-        let selected = droplet.tab == tab
-        Button { droplet.select(tab) } label: { Image(systemName: symbol) }
-            .buttonStyle(DroppyCircleButtonStyle(
-                size: size,
-                destructive: false,
-                solidFill: selected ? Color.green.opacity(0.22) : AdaptiveColors.notchSurfaceCardFill,
-                foregroundColorOverride: selected ? .green : AdaptiveColors.notchSurfaceSecondaryText
-            ))
-            .help(label)
-            .accessibilityLabel(label)
-            .accessibilityAddTraits(selected ? .isSelected : [])
+        Group {
+            if failed {
+                Text("Failed").foregroundStyle(.red)
+            } else if let narration {
+                Text(narration.verb).fontWeight(.semibold).foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    + Text(verbatim: narration.object.map { " " + $0 } ?? "").foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            } else {
+                Text("Idle").foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            }
+        }
+        .font(.system(size: size))
+        .lineLimit(1)
+        .truncationMode(.middle)
+    }
+}
+
+private struct ElapsedText: View {
+    let since: Date?
+    let size: CGFloat
+
+    var body: some View {
+        if let since {
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                Text(verbatim: Formatting.elapsed(timeline.date.timeIntervalSince(since)))
+                    .font(.system(size: size, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+            }
+        }
+    }
+}
+
+/// The oldest request, with everything needed to decide on it in view.
+private struct ApprovalView: View {
+    let droplet: OpenchamberDroplet
+    let permission: PendingPermission
+    let compact: Bool
+
+    var body: some View {
+        let session = droplet.state.sessions[permission.sessionID]
+        let command = permission.resources.joined(separator: "\n")
+        if compact {
+            VStack(alignment: .leading, spacing: DroppySpacing.xs) {
+                Text(session?.title ?? "A session")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .lineLimit(1)
+                Text(command.isEmpty ? permission.action : command)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: DroppySpacing.sm)
+                HStack(spacing: DroppySpacing.xsm) {
+                    Button("Allow once") { droplet.reply(to: permission, decision: "once") }
+                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                    Spacer(minLength: 0)
+                    Button("Reject") { droplet.reply(to: permission, decision: "reject") }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                }
+                .frame(height: 28)
+            }
+        } else {
+            VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
+                HStack(spacing: DroppySpacing.xsm) {
+                    AgentMark(provider: session?.providerID ?? "", size: 16)
+                    Text(session?.title ?? "A session")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                        .lineLimit(1)
+                    Text("wants to \(permission.action == "bash" || permission.action == "shell" ? "run" : permission.action)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                    Spacer(minLength: DroppySpacing.sm)
+                    Text([droplet.serverLabel(forSession: permission.sessionID), session?.project].compactMap { $0 }.joined(separator: " · "))
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture { droplet.openSession(permission.sessionID) }
+                if !command.isEmpty {
+                    Text(command)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+                HStack(spacing: DroppySpacing.xsm) {
+                    Button("Allow once") { droplet.reply(to: permission, decision: "once") }
+                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                    Button("Always") { droplet.reply(to: permission, decision: "always") }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                    Spacer(minLength: 0)
+                    if droplet.state.pendingCount > 1 {
+                        Text(verbatim: "+\(droplet.state.pendingCount - 1)")
+                            .font(.system(size: 11, weight: .medium))
+                            .monospacedDigit()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    }
+                    Button("Reject") { droplet.reply(to: permission, decision: "reject") }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                }
+            }
+            .padding(DroppySpacing.smd)
+            .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
+        }
+    }
+}
+
+/// Forms can hold any number of fields, so they are answered in OpenChamber.
+private struct FormView: View {
+    let droplet: OpenchamberDroplet
+    let form: PendingForm
+    let compact: Bool
+
+    var body: some View {
+        let session = droplet.state.sessions[form.sessionID]
+        VStack(alignment: .leading, spacing: DroppySpacing.xs) {
+            Text(form.title)
+                .font(.system(size: compact ? 14 : 15, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .lineLimit(2)
+            Text(session.map { "\($0.title) · \($0.project)" } ?? "A session asks")
+                .font(.system(size: 12))
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                .lineLimit(1)
+            Spacer(minLength: DroppySpacing.sm)
+            HStack {
+                Button("Answer in OpenChamber") { droplet.openSession(form.sessionID) }
+                    .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                Spacer(minLength: 0)
+            }
+            .frame(height: 28)
+        }
     }
 }
 
@@ -326,171 +614,6 @@ private struct NoServersMessage: View {
     }
 }
 
-private struct BigFigure: View {
-    let value: String
-    let label: String
-    let color: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(verbatim: value)
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(color)
-            Text(label)
-                .font(.system(size: 11))
-                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-        }
-    }
-}
-
-/// The oldest request, with everything needed to decide on it in view: the
-/// tool, the session, and the full command.
-private struct PermissionTile: View {
-    let droplet: OpenchamberDroplet
-    let permission: PendingPermission
-    let more: Int
-
-    var body: some View {
-        let session = droplet.state.sessions[permission.sessionID]
-        VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
-            HStack(spacing: DroppySpacing.xsm) {
-                Circle().fill(.orange).frame(width: 6, height: 6)
-                Text(permission.action)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                Text([droplet.serverLabel(forSession: permission.sessionID), session?.project, session?.title].compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 11))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    .lineLimit(1)
-                Spacer(minLength: DroppySpacing.sm)
-                if more > 0 {
-                    Text(verbatim: "+\(more)")
-                        .font(.system(size: 11, weight: .medium))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                }
-            }
-            if !permission.resources.isEmpty {
-                Text(permission.resources.joined(separator: "\n"))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-            }
-            HStack(spacing: DroppySpacing.xsm) {
-                Button("Allow once") { droplet.reply(to: permission, decision: "once") }
-                    .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
-                Button("Always") { droplet.reply(to: permission, decision: "always") }
-                    .buttonStyle(DroppyQuietButtonStyle(size: .small))
-                Spacer(minLength: 0)
-                Button("Reject") { droplet.reply(to: permission, decision: "reject") }
-                    .buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
-                Button { droplet.openSession(permission.sessionID) } label: { Image(systemName: "arrow.up.forward") }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 24))
-                    .accessibilityLabel("Open in OpenChamber")
-            }
-        }
-        .padding(DroppySpacing.sm)
-        .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
-    }
-}
-
-/// Forms can hold any number of fields, so they are answered in OpenChamber.
-private struct FormTile: View {
-    let droplet: OpenchamberDroplet
-    let form: PendingForm
-    let session: SessionInfo?
-
-    var body: some View {
-        HStack(spacing: DroppySpacing.sm) {
-            Circle().fill(.orange).frame(width: 6, height: 6)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(form.title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(1)
-                Text(session.map { "\($0.project) · \($0.title)" } ?? "A session asks")
-                    .font(.system(size: 11))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    .lineLimit(1)
-            }
-            Spacer(minLength: DroppySpacing.sm)
-            Button("Answer") { droplet.openSession(form.sessionID) }
-                .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
-        }
-        .padding(DroppySpacing.sm)
-        .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
-    }
-}
-
-/// One session the way Agents shows one: who is working and on what, the last
-/// tool calls with their outcome, and what the assistant last said.
-private struct SessionProgress: View {
-    let droplet: OpenchamberDroplet
-    let sessionID: String
-    let compact: Bool
-
-    var body: some View {
-        let session = droplet.state.sessions[sessionID]
-        let activity = droplet.state.activity[sessionID] ?? SessionActivity()
-        let provider = session?.providerID ?? ""
-        let accent = ProviderStyle.accent(provider)
-        let title = session?.title ?? "Session"
-        HStack(alignment: .top, spacing: DroppySpacing.md) {
-            VStack(alignment: .leading, spacing: compact ? 4 : 6) {
-                HStack(spacing: DroppySpacing.xsm) {
-                    AgentMark(provider: provider, size: compact ? 18 : 22)
-                    Text(ProviderStyle.displayName(provider))
-                        .font(.system(size: compact ? 13 : 15, weight: .bold))
-                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                        .layoutPriority(1)
-                    if !compact {
-                        Circle().fill(accent).frame(width: 6, height: 6)
-                        Text(title)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(accent)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: DroppySpacing.sm)
-                    if let since = activity.busySince {
-                        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                            Text(verbatim: Formatting.elapsed(timeline.date.timeIntervalSince(since)))
-                                .font(.system(size: 12, weight: .medium))
-                                .monospacedDigit()
-                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        }
-                    }
-                }
-                if compact {
-                    Text(title)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(accent)
-                        .lineLimit(1)
-                }
-                ForEach(activity.calls.suffix(compact ? 2 : 3), id: \.id) { call in
-                    CallRow(call: call, accent: accent, compact: compact)
-                }
-            }
-            if !compact, let text = activity.lastText {
-                // A fixed width, so the title truncates rather than the message,
-                // which grows down to four lines.
-                Text(text)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(4)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: 150, alignment: .leading)
-                    .padding(DroppySpacing.md)
-                    .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.large, style: .continuous))
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { droplet.openSession(sessionID) }
-        .accessibilityAddTraits(.isButton)
-    }
-}
-
 /// The provider's icon when Droppy has one, else OpenChamber's cube.
 private struct AgentMark: View {
     let provider: String
@@ -505,96 +628,17 @@ private struct AgentMark: View {
     }
 }
 
-/// `✓ read  formatters.js`, `▶ bash  swift test`, `✗ edit  Views.swift`.
-private struct CallRow: View {
-    let call: ToolCall
-    let accent: Color
-    let compact: Bool
-
-    var body: some View {
-        HStack(spacing: DroppySpacing.xsm) {
-            Image(systemName: symbol)
-                .font(.system(size: compact ? 10 : 11, weight: .bold))
-                .foregroundStyle(call.mark == .failed ? Color.red : accent)
-                .frame(width: 14)
-            Text(call.name)
-                .font(.system(size: compact ? 12 : 13))
-                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                .lineLimit(1)
-                .layoutPriority(1)
-            if let target = call.target {
-                Text(target)
-                    .font(.system(size: compact ? 11 : 12))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
-    }
-
-    private var symbol: String {
-        switch call.mark {
-        case .running: return "play.fill"
-        case .succeeded: return "checkmark"
-        case .failed: return "xmark"
-        }
-    }
-}
-
-private struct SessionRow: View {
-    let droplet: OpenchamberDroplet
-    let sessionID: String
-
-    var body: some View {
-        let session = droplet.state.sessions[sessionID]
-        let activity = droplet.state.activity[sessionID] ?? SessionActivity()
-        HStack(alignment: .center, spacing: DroppySpacing.sm) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session?.title ?? "Session")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(1)
-                Text(detail(server: droplet.serverLabel(forSession: sessionID), session: session, call: activity.currentCall))
-                    .font(.system(size: 11))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-            Spacer(minLength: DroppySpacing.md)
-            VStack(alignment: .trailing, spacing: 3) {
-                if let since = activity.busySince {
-                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                        Text(verbatim: Formatting.elapsed(timeline.date.timeIntervalSince(since)))
-                            .font(.system(size: 12, weight: .medium))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    }
-                }
-                CallStrip(calls: activity.calls)
-            }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { droplet.openSession(sessionID) }
-        .accessibilityAddTraits(.isButton)
-    }
-
-    private func detail(server: String?, session: SessionInfo?, call: ToolCall?) -> String {
-        let action = call.map { [$0.name, $0.target].compactMap { $0 }.joined(separator: " ") }
-        return [server, session?.project, action].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-    }
-}
-
-/// The last calls of a session, oldest first: white while running, green
-/// done, red failed. Enough to see a run going wrong without opening it.
+/// The turn's calls, oldest first: white while running, green done, red
+/// failed. A run going wrong shows before you read a word.
 private struct CallStrip: View {
     let calls: [ToolCall]
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(calls, id: \.id) { call in
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(color(call.mark))
-                    .frame(width: 3, height: 9)
+                    .frame(width: 4, height: 10)
             }
         }
         .accessibilityHidden(true)
@@ -602,7 +646,7 @@ private struct CallStrip: View {
 
     private func color(_ mark: ToolMark) -> Color {
         switch mark {
-        case .running: return AdaptiveColors.notchSurfaceSecondaryText
+        case .running: return AdaptiveColors.notchSurfacePrimaryText
         case .succeeded: return .green.opacity(0.85)
         case .failed: return .red.opacity(0.85)
         }
@@ -810,23 +854,23 @@ enum ProviderStyle {
         return nil
     }
 
-    /// What Agents calls the agent: the product, not the model id.
+    /// What Agents calls the agent: the product, not the provider id.
     static func displayName(_ provider: String) -> String {
-        switch provider.lowercased() {
+        let id = provider.lowercased()
+        switch key(provider) {
+        case "claude": return "Claude"
+        case "codex": return id.contains("codex") ? "Codex" : "OpenAI"
+        case "opencode": return "OpenCode"
+        case "cursor": return "Cursor"
+        case "antigravity": return "Antigravity"
+        default: break
+        }
+        switch id {
         case "": return "OpenChamber"
-        case "anthropic", "claude": return "Claude"
-        case "openai": return "OpenAI"
-        case "codex": return "Codex"
-        case "opencode", "opencode-go": return "OpenCode"
         case "google", "google-vertex": return "Gemini"
         case "github-copilot": return "Copilot"
         default: return provider.prefix(1).uppercased() + provider.dropFirst()
         }
-    }
-
-    /// The session title's colour: the brand's, or OpenChamber's orange.
-    static func accent(_ provider: String) -> Color {
-        key(provider) == nil || key(provider) == "opencode" || key(provider) == "cursor" ? .orange : color(provider)
     }
 
     static func color(_ provider: String) -> Color {

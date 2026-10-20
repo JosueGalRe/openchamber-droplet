@@ -73,6 +73,9 @@ struct Narration: Equatable, Sendable {
 
     static let thinking = Narration(verb: "Thinking…", object: nil)
 
+    /// "Editing Views.swift", for a line with no room for weights.
+    var sentence: String { [verb, object].compactMap { $0 }.joined(separator: " ") }
+
     init(verb: String, object: String?) {
         self.verb = verb
         self.object = object

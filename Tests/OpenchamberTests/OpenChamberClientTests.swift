@@ -113,3 +113,10 @@ private var relay: [String: Any] { [
     // Past the smallest readable ring, the rest are left out instead of shrinking further.
     #expect(RingLayout(count: 8, width: 224, compact: true).visible == 3)
 }
+
+@MainActor @Test func providersReadByTheirProductName() {
+    #expect(ProviderStyle.displayName("claude-code") == "Claude")
+    #expect(ProviderStyle.displayName("anthropic") == "Claude")
+    #expect(ProviderStyle.displayName("openai") == "OpenAI")
+    #expect(ProviderStyle.displayName("") == "OpenChamber")
+}
