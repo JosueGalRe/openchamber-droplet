@@ -25,6 +25,7 @@ let package = Package(
                 "Openchamber",
                 .product(name: "DroppyKitHarness", package: "droppykit")
             ]
-        )
+        ),
+        .testTarget(name: "OpenchamberTests", dependencies: ["Openchamber"])
     ]
 )
