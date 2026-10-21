@@ -210,3 +210,17 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     let bare = ActivityWire.event(from: wire("session.execution.failed", ["sessionID": "s1"]), now: t0)
     #expect(bare == .executionEnded(sessionID: "s1", outcome: .failed, at: t0, error: nil))
 }
+
+@Test func aFormReadsAsItsFirstQuestionNotItsHeader() {
+    let event = ActivityWire.event(from: wire("form.created", ["form": [
+        "id": "f1", "sessionID": "s1", "title": "Questions",
+        "fields": [["key": "a", "title": "Prueba", "description": "¿Se vio la tarjeta?"], ["key": "b", "title": "¿Y la otra?"]],
+    ]]), now: t0)
+    guard case let .formCreated(form) = event else { Issue.record("no form: \(String(describing: event))"); return }
+    #expect(form.title == "¿Se vio la tarjeta?")
+    #expect(form.moreQuestions == 1)
+
+    let bare = ActivityWire.event(from: wire("form.created", ["form": ["id": "f2", "sessionID": "s1", "title": "Pick one", "fields": [["key": "a"]]]]), now: t0)
+    guard case let .formCreated(header) = bare else { Issue.record("no form"); return }
+    #expect(header.title == "Pick one")
+}

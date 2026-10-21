@@ -143,8 +143,11 @@ struct PendingPermission: Equatable, Identifiable, Sendable {
 struct PendingForm: Equatable, Identifiable, Sendable {
     let id: String
     let sessionID: String
+    /// What it asks: the first question, not the form's header.
     var title: String
     var directory: String?
+    /// Questions after the first, answered in the same form.
+    var moreQuestions = 0
 }
 
 enum ExecutionOutcome: String, Equatable, Sendable {
@@ -525,7 +528,15 @@ enum ActivityWire {
 
     static func form(from data: [String: Any], directory: String?) -> PendingForm? {
         guard let id = data["id"] as? String, let sessionID = data["sessionID"] as? String else { return nil }
-        return PendingForm(id: id, sessionID: sessionID, title: data["title"] as? String ?? "A question", directory: directory)
+        // A v2 form's title is a header such as "Questions"; the ask is its
+        // first field's description, else that field's title, which is how
+        // OpenChamber's own notifications read it.
+        let fields = data["fields"] as? [[String: Any]] ?? []
+        let ask = [fields.first?["description"], fields.first?["title"], data["title"]]
+            .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        return PendingForm(id: id, sessionID: sessionID, title: ask ?? "A question", directory: directory,
+                           moreQuestions: max(0, fields.count - 1))
     }
 
     /// The part of a tool's input worth a glance: a file name, a command, a host.

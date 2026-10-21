@@ -343,11 +343,19 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         Task { try? await client.interrupt(sessionID: sessionID, directory: directory) }
     }
 
-    /// Opens the session in OpenChamber Desktop. A remote server's session
-    /// opens there too once Desktop is switched to that host.
+    /// Opens the session in OpenChamber Desktop. Desktop shows one host at a
+    /// time, so a remote server's session switches Desktop to that host first;
+    /// Desktop holds the session link until the switched window can take it.
     func openSession(_ id: String) {
         guard let url = URL(string: "openchamber://session/\(id)") else { return }
-        _ = host?.workspace.open(url)
+        // shortcut: Droppy's workspace.open refuses every scheme but http(s), mailto and file, and DroppyKit has no way to declare one, so this personal droplet opens the link itself; a Store build needs Droppy to allow openchamber://.
+        // shortcut: a local session does not switch Desktop back from a remote host, since the switch reloads the window even when it is already there; send openchamber://host/local first if that bites.
+        if let serverID = serverID(forSession: id), serverID != ChamberServer.localID,
+           let hostID = serverID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+           let hostURL = URL(string: "openchamber://host/\(hostID)") {
+            NSWorkspace.shared.open(hostURL)
+        }
+        NSWorkspace.shared.open(url)
     }
 
     /// Keeps the shelf open while a usage card hangs below it, so moving the
@@ -525,7 +533,8 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             if tab != .sessions { tab = .sessions }
             guard !openChamberIsInFront else { continue }
             let session = state.sessions[form.sessionID]
-            let meta = [session?.project, serverLabel(forSession: form.sessionID)].compactMap { $0 }.joined(separator: " · ")
+            let meta = ([form.moreQuestions > 0 ? "+\(form.moreQuestions) more" : nil, session?.project, serverLabel(forSession: form.sessionID)])
+                .compactMap { $0 }.joined(separator: " · ")
             _ = host.hud.present(DropletHUDRequest(
                 id: formHUDID(form.id), duration: nil, priority: .high,
                 accessibilityLabel: "\(session?.title ?? "A session") asks: \(form.title)", isExpanded: true, expandedContentHeight: 104
