@@ -1049,21 +1049,10 @@ struct NoticeCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
-            HStack(spacing: DroppySpacing.sm) {
-                Text(verbatim: title)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .lineLimit(detailStyle == .plain ? 2 : 1)
-                Spacer(minLength: 0)
-                if let meta {
-                    Text(verbatim: meta)
-                        .font(.system(size: 11))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        .lineLimit(1)
-                        .layoutPriority(1)
-                }
-            }
+            Text(verbatim: title)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                .lineLimit(detailStyle == .plain ? 2 : 1)
             if let detail {
                 switch detailStyle {
                 case .quote:
@@ -1071,6 +1060,7 @@ struct NoticeCard: View {
                         .font(.system(size: 12))
                         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
                         .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.leading, DroppySpacing.sm)
                         .overlay(alignment: .leading) {
                             Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
@@ -1080,6 +1070,7 @@ struct NoticeCard: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
                         .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 case .plain:
                     Text(detail)
                         .font(.system(size: 11))
@@ -1094,6 +1085,13 @@ struct NoticeCard: View {
                         .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
                     Spacer(minLength: 0)
                 } else {
+                    if let meta {
+                        Text(verbatim: meta)
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 0)
                     Button(action, action: onAction)
                         .buttonStyle(DroppyQuietButtonStyle(size: .small))
