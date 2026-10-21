@@ -1241,7 +1241,7 @@ struct OpenchamberSettings: View {
                     }
                     DropletControlRow(
                         title: droplet.servers.isEmpty ? "No servers found" : "From OpenChamber Desktop",
-                        infoTip: "The servers and tokens OpenChamber Desktop already uses, read from ~/.config/openchamber/settings.json. Relay-only hosts are left out."
+                        infoTip: "The servers and tokens OpenChamber Desktop already uses, read from ~/.config/openchamber/settings.json. A host is reached at its own address first and through OpenChamber's relay when that does not answer."
                     ) {
                         Button("Reload") { droplet.reloadServers() }
                             .buttonStyle(.bordered)
