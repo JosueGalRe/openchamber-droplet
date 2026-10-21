@@ -490,7 +490,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         let last = state.activity[id]?.lastText
         _ = host.hud.present(DropletHUDRequest(
             id: Self.doneHUDID, duration: 6,
-            accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: 84
+            accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: last == nil ? 52 : 84
         ) {
             NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: count > 1 ? "\(count) done" : "Done", tint: .green)
         } expanded: {
