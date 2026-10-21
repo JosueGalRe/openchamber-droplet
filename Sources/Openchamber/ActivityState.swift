@@ -157,7 +157,8 @@ enum ActivityEvent: Equatable, Sendable {
     case seeded(busy: Set<String>, permissions: [PendingPermission], forms: [PendingForm], at: Date)
     case sessionsListed([SessionInfo])
     case executionStarted(sessionID: String, at: Date)
-    case executionEnded(sessionID: String, outcome: ExecutionOutcome, at: Date)
+    /// `error` is OpenCode's, as `ProviderAuthError: token expired`, on a failure.
+    case executionEnded(sessionID: String, outcome: ExecutionOutcome, at: Date, error: String? = nil)
     case retryScheduled(sessionID: String, attempt: Int, at: Date, scheduled: Date)
     case toolStarted(sessionID: String, callID: String, name: String)
     case toolCalled(sessionID: String, callID: String, name: String?, target: String?)
@@ -292,7 +293,7 @@ struct ActivityState: Equatable, Sendable {
             session.steps = 0
             activity[id] = session
 
-        case let .executionEnded(id, outcome, at):
+        case let .executionEnded(id, outcome, at, _):
             var session = activity[id, default: SessionActivity()]
             session.busySince = nil
             session.retry = nil
@@ -417,7 +418,11 @@ enum ActivityWire {
         case "session.execution.succeeded":
             return sessionID.map { .executionEnded(sessionID: $0, outcome: .succeeded, at: at) }
         case "session.execution.failed":
-            return sessionID.map { .executionEnded(sessionID: $0, outcome: .failed, at: at) }
+            let error = data["error"] as? [String: Any]
+            let text = [error?["type"] as? String, error?["message"] as? String]
+                .compactMap { $0?.isEmpty == false ? $0 : nil }
+                .joined(separator: ": ")
+            return sessionID.map { .executionEnded(sessionID: $0, outcome: .failed, at: at, error: text.isEmpty ? nil : text) }
         case "session.execution.interrupted":
             // OpenCode shutting down is not the session's doing.
             guard data["reason"] as? String != "shutdown" else { return nil }

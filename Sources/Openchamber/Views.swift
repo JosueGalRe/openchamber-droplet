@@ -1013,6 +1013,97 @@ struct PermissionCard: View {
     }
 }
 
+/// A turn's notice in the strip: OpenChamber's cube at the left edge, what
+/// happened at the right, nothing under the camera.
+struct NoticeStrip: View {
+    let motion: ChamberGlyphMotion
+    let symbol: String
+    let label: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ChamberGlyph(motion: motion, size: DroppyLiveActivityMetrics.iconSize, isAnimating: false)
+            Spacer(minLength: 0)
+            HStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: DroppyLiveActivityMetrics.labelFontSize - 2, weight: .semibold))
+                Text(verbatim: label).font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .semibold))
+            }
+            .foregroundStyle(tint)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// The card a notice grows into: who, what it said, and the way back to it.
+struct NoticeCard: View {
+    enum DetailStyle { case quote, code, plain }
+
+    let title: String
+    let meta: String?
+    let detail: String?
+    let detailStyle: DetailStyle
+    let action: String
+    var accent = false
+    let onAction: @MainActor () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
+            HStack(spacing: DroppySpacing.sm) {
+                Text(verbatim: title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    .lineLimit(detailStyle == .plain ? 2 : 1)
+                Spacer(minLength: 0)
+                if let meta {
+                    Text(verbatim: meta)
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                        .layoutPriority(1)
+                }
+            }
+            if let detail {
+                switch detailStyle {
+                case .quote:
+                    Text(detail)
+                        .font(.system(size: 12))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .lineLimit(2)
+                        .padding(.leading, DroppySpacing.sm)
+                        .overlay(alignment: .leading) {
+                            Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
+                        }
+                case .code:
+                    Text(detail)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .lineLimit(2)
+                case .plain:
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: DroppySpacing.xsm) {
+                if accent {
+                    Button(action, action: onAction)
+                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                    Spacer(minLength: 0)
+                } else {
+                    Spacer(minLength: 0)
+                    Button(action, action: onAction)
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
 struct UsageStrip: View {
     let provider: String
     let percent: Double
@@ -1092,6 +1183,21 @@ struct OpenchamberSettings: View {
                         title: "Show a card when a session needs you",
                         subtitle: "Allow once or reject from the notch. Always stays in the shelf widget.",
                         isOn: preference("permissionCards", value: droplet.showsPermissionCards)
+                    )
+                    DropletToggleRow(
+                        title: "Show a card when a session asks a question",
+                        subtitle: "Answered in OpenChamber.",
+                        isOn: preference("questionCards", value: droplet.showsQuestionCards)
+                    )
+                    DropletToggleRow(
+                        title: "Show a card when a turn ends",
+                        subtitle: "The session's last message. Not while OpenChamber is in front.",
+                        isOn: preference("doneCards", value: droplet.showsDoneCards)
+                    )
+                    DropletToggleRow(
+                        title: "Show a card when a turn fails",
+                        subtitle: "The error OpenCode reported.",
+                        isOn: preference("failureCards", value: droplet.showsFailureCards)
                     )
                     DropletToggleRow(
                         title: "Warn about plan usage",

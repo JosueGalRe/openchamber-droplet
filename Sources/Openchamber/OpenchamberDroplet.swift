@@ -3,6 +3,7 @@
 //  Openchamber
 //
 
+import AppKit
 import Combine
 import DroppyKit
 import SwiftUI
@@ -67,6 +68,9 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     private var ticker: AnyCancellable?
     private var sessionLookups: Set<String> = []
     private var announcedPermissions: Set<String> = []
+    private var announcedForms: Set<String> = []
+    /// Turns that ended while the last Done card was up, so it can say "2 done".
+    private var recentTurnEnds: [Date] = []
     private var usageWarnings: Set<String> = []
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
     private let lockScreenSubject = CurrentValueSubject<LockScreenStatusEntry?, Never>(nil)
@@ -100,6 +104,9 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         host?.shortcuts.unregister(id: "approve-oldest")
         host?.shortcuts.unregister(id: "open-waiting")
         for id in announcedPermissions { host?.hud.dismiss(id: hudID(id)) }
+        for id in announcedForms { host?.hud.dismiss(id: formHUDID(id)) }
+        host?.hud.dismiss(id: Self.doneHUDID)
+        host?.hud.dismiss(id: Self.failedHUDID)
         activitySubject.send(nil)
         lockScreenSubject.send(nil)
         host = nil
@@ -113,6 +120,18 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     var warnsAboutUsage: Bool {
         host?.preferences.value(forKey: "usageWarnings", default: true) ?? true
+    }
+
+    var showsDoneCards: Bool {
+        host?.preferences.value(forKey: "doneCards", default: true) ?? true
+    }
+
+    var showsFailureCards: Bool {
+        host?.preferences.value(forKey: "failureCards", default: true) ?? true
+    }
+
+    var showsQuestionCards: Bool {
+        host?.preferences.value(forKey: "questionCards", default: true) ?? true
     }
 
     func select(_ tab: WidgetTab) {
@@ -258,6 +277,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     private func apply(_ event: ActivityEvent, from serverID: String) {
         guard var server = serverStates[serverID] else { return }
         let wasBusy = !server.activity.busySessionIDs.isEmpty
+        var ended: (() -> Void)?
+        if case let .executionEnded(id, outcome, at, error) = event {
+            let turn = server.activity.activity[id]?.busySince.map { at.timeIntervalSince($0) }
+            ended = { [weak self] in self?.announceEnd(of: id, outcome: outcome, error: error, turn: turn) }
+        }
         server.activity.apply(event)
         serverStates[serverID] = server
         lookUpUnknownSessions(on: serverID)
@@ -266,6 +290,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             refreshUsage(on: serverID, ifOlderThan: 30)
         }
         publish()
+        ended?()
     }
 
     private func lookUpUnknownSessions(on serverID: String) {
@@ -343,6 +368,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         let merged = ActivityState.merged(servers.compactMap { serverStates[$0.id]?.activity })
         if merged != state { state = merged }
         announceNewPermissions()
+        announceNewForms()
 
         let next = state.phase(at: now)
         if next != phase { phase = next }
@@ -422,6 +448,81 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 )
             }
             _ = host.hud.present(request)
+        }
+    }
+
+    private static let doneHUDID = "openchamber.done"
+    private static let failedHUDID = "openchamber.failed"
+    private func formHUDID(_ formID: String) -> String { "openchamber.form.\(formID)" }
+
+    /// OpenChamber in front already shows what the cards would say.
+    private var openChamberIsInFront: Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "dev.openchamber.desktop"
+    }
+
+    /// A card when a turn ends or fails, the way OpenChamber's own notifications
+    /// word it: the session, its project, and the last message or the error.
+    /// A subagent's turn is part of its parent's, and a session we have no
+    /// record of yet could be one, so neither says anything.
+    private func announceEnd(of id: String, outcome: ExecutionOutcome, error: String?, turn: TimeInterval?) {
+        guard outcome != .interrupted, let host, !openChamberIsInFront,
+              let session = state.sessions[id], session.parentID == nil else { return }
+        let meta = [session.project, serverLabel(forSession: id), turn.map(Formatting.elapsed)].compactMap { $0 }.joined(separator: " · ")
+        let open: @MainActor () -> Void = { [weak self] in self?.openSession(id) }
+
+        if outcome == .failed {
+            guard showsFailureCards else { return }
+            _ = host.hud.present(DropletHUDRequest(
+                id: Self.failedHUDID, duration: 10, priority: .high,
+                accessibilityLabel: "\(session.title) failed", isExpanded: true, expandedContentHeight: 84
+            ) {
+                NoticeStrip(motion: .failed, symbol: "exclamationmark.triangle.fill", label: "Failed", tint: .red)
+            } expanded: {
+                NoticeCard(title: session.title, meta: meta, detail: error ?? "The turn failed.", detailStyle: .code, action: "Open", onAction: open)
+            })
+            return
+        }
+
+        guard showsDoneCards else { return }
+        let now = Date()
+        recentTurnEnds = recentTurnEnds.filter { now.timeIntervalSince($0) < 6 } + [now]
+        let count = recentTurnEnds.count
+        let last = state.activity[id]?.lastText
+        _ = host.hud.present(DropletHUDRequest(
+            id: Self.doneHUDID, duration: 6,
+            accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: 84
+        ) {
+            NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: count > 1 ? "\(count) done" : "Done", tint: .green)
+        } expanded: {
+            NoticeCard(title: session.title, meta: meta, detail: last, detailStyle: .quote, action: "Open", onAction: open)
+        })
+    }
+
+    /// A card for each new question, for twelve seconds; it goes when the
+    /// question is answered. Forms can hold any number of fields, so they are
+    /// answered in OpenChamber.
+    private func announceNewForms() {
+        let current = Set(state.forms.map(\.id))
+        for gone in announcedForms.subtracting(current) { host?.hud.dismiss(id: formHUDID(gone)) }
+        announcedForms.formIntersection(current)
+
+        guard showsQuestionCards, let host else { return }
+        for form in state.forms where !announcedForms.contains(form.id) {
+            announcedForms.insert(form.id)
+            if tab != .sessions { tab = .sessions }
+            guard !openChamberIsInFront else { continue }
+            let session = state.sessions[form.sessionID]
+            let meta = [session?.title, serverLabel(forSession: form.sessionID)].compactMap { $0 }.joined(separator: " · ")
+            _ = host.hud.present(DropletHUDRequest(
+                id: formHUDID(form.id), duration: 12, priority: .high,
+                accessibilityLabel: "\(session?.title ?? "A session") asks: \(form.title)", isExpanded: true, expandedContentHeight: 84
+            ) {
+                NoticeStrip(motion: .waiting, symbol: "questionmark.bubble.fill", label: "Question", tint: .orange)
+            } expanded: { [weak self] in
+                NoticeCard(title: form.title, meta: nil, detail: meta, detailStyle: .plain, action: "Answer in OpenChamber", accent: true) {
+                    self?.openSession(form.sessionID)
+                }
+            })
         }
     }
 

@@ -203,3 +203,10 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(Narration.command("if [ -f x ]; then make build; fi") == "make build")
     #expect(Narration.command("while true; do sleep 5; done") == "sleep 5")
 }
+
+@Test func aFailedTurnCarriesOpenCodesError() {
+    let failed = ActivityWire.event(from: wire("session.execution.failed", ["sessionID": "s1", "error": ["type": "ProviderAuthError", "message": "token expired"]]), now: t0)
+    #expect(failed == .executionEnded(sessionID: "s1", outcome: .failed, at: t0, error: "ProviderAuthError: token expired"))
+    let bare = ActivityWire.event(from: wire("session.execution.failed", ["sessionID": "s1"]), now: t0)
+    #expect(bare == .executionEnded(sessionID: "s1", outcome: .failed, at: t0, error: nil))
+}
