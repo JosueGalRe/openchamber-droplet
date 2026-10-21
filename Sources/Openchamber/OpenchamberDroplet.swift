@@ -413,10 +413,9 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     private func hudID(_ permissionID: String) -> String { "openchamber.permission.\(permissionID)" }
 
-    /// A card for each new request, for twelve seconds. The request stays in
-    /// the widget and the live activity after the card goes. "Always" is not
-    /// offered here: a standing rule is not something to grant from a card
-    /// that passes in front of you.
+    /// A card for each new request, up until it is answered here or anywhere
+    /// else. "Always" is not offered here: a standing rule is not something to
+    /// grant from a card that passes in front of you.
     private func announceNewPermissions() {
         let current = Set(state.permissions.map(\.id))
         for gone in announcedPermissions.subtracting(current) { host?.hud.dismiss(id: hudID(gone)) }
@@ -428,22 +427,28 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             // A request must not wait behind the usage page.
             if tab != .sessions { tab = .sessions }
             let session = state.sessions[permission.sessionID]
+            let command = permission.resources.joined(separator: "\n")
+            let verb = permission.action == "bash" || permission.action == "shell" ? "run" : permission.action
+            let meta = [session?.project, serverLabel(forSession: permission.sessionID)].compactMap { $0 }.joined(separator: " · ")
             let request = DropletHUDRequest(
                 id: hudID(permission.id),
-                duration: 12,
+                duration: nil,
                 priority: .high,
-                accessibilityLabel: "\(session?.title ?? "A session") asks to run \(permission.action)",
+                accessibilityLabel: "\(session?.title ?? "A session") asks to \(verb) \(command)",
                 isExpanded: true,
-                expandedContentHeight: 92
+                expandedContentHeight: 104
             ) {
                 PermissionStrip(action: permission.action)
             } expanded: { [weak self] in
                 // The host keeps these builders, so they hold the droplet weakly.
-                PermissionCard(
-                    permission: permission,
-                    session: session,
-                    onAllow: { self?.reply(to: permission, decision: "once") },
-                    onReject: { self?.reply(to: permission, decision: "reject") },
+                NoticeCard(
+                    provider: session?.providerID ?? "", symbol: "hand.raised.fill", tint: .orange,
+                    title: session?.title ?? "A session", status: "Wants to \(verb)", meta: meta,
+                    detail: command.isEmpty ? permission.action : command, style: .code,
+                    actions: [
+                        NoticeAction(title: "Allow once", role: .accent) { self?.reply(to: permission, decision: "once") },
+                        NoticeAction(title: "Reject", role: .destructive) { self?.reply(to: permission, decision: "reject") },
+                    ],
                     onOpen: { self?.openSession(permission.sessionID) }
                 )
             }
@@ -467,40 +472,48 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     private func announceEnd(of id: String, outcome: ExecutionOutcome, error: String?, turn: TimeInterval?) {
         guard outcome != .interrupted, let host, !openChamberIsInFront,
               let session = state.sessions[id], session.parentID == nil else { return }
-        let meta = [session.project, serverLabel(forSession: id), turn.map(Formatting.elapsed)].compactMap { $0 }.joined(separator: " · ")
+        let place = [session.project, serverLabel(forSession: id)].compactMap { $0 }
         let open: @MainActor () -> Void = { [weak self] in self?.openSession(id) }
 
         if outcome == .failed {
             guard showsFailureCards else { return }
             _ = host.hud.present(DropletHUDRequest(
                 id: Self.failedHUDID, duration: 10, priority: .high,
-                accessibilityLabel: "\(session.title) failed", isExpanded: true, expandedContentHeight: 84
+                accessibilityLabel: "\(session.title) failed", isExpanded: true, expandedContentHeight: 72
             ) {
                 NoticeStrip(motion: .failed, symbol: "exclamationmark.triangle.fill", label: "Failed", tint: .red)
             } expanded: {
-                NoticeCard(title: session.title, meta: meta, detail: error ?? "The turn failed.", detailStyle: .code, action: "Open", onAction: open)
+                NoticeCard(
+                    provider: session.providerID ?? "", symbol: "exclamationmark", tint: .red, title: session.title,
+                    status: ["Failed", turn.map { "after \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " "),
+                    meta: place.joined(separator: " · "), detail: error ?? "The turn failed.", style: .code, onOpen: open
+                )
             })
             return
         }
 
         guard showsDoneCards else { return }
         let now = Date()
-        recentTurnEnds = recentTurnEnds.filter { now.timeIntervalSince($0) < 6 } + [now]
-        let count = recentTurnEnds.count
+        recentTurnEnds = recentTurnEnds.filter { now.timeIntervalSince($0) < 5 } + [now]
+        let others = recentTurnEnds.count - 1
         let last = state.activity[id]?.lastText
         _ = host.hud.present(DropletHUDRequest(
-            id: Self.doneHUDID, duration: 6,
-            accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: last == nil ? 52 : 84
+            id: Self.doneHUDID, duration: 5,
+            accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: last == nil ? 36 : 72
         ) {
-            NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: count > 1 ? "\(count) done" : "Done", tint: .green)
+            NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: others > 0 ? "\(others + 1) done" : "Done", tint: .green)
         } expanded: {
-            NoticeCard(title: session.title, meta: meta, detail: last, detailStyle: .quote, action: "Open", onAction: open)
+            NoticeCard(
+                provider: session.providerID ?? "", symbol: "checkmark", tint: .green, title: session.title,
+                status: ["Done", turn.map { "in \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " "),
+                meta: ((others > 0 ? ["+\(others) more"] : []) + place).joined(separator: " · "),
+                detail: last, style: .text, onOpen: open
+            )
         })
     }
 
-    /// A card for each new question, for twelve seconds; it goes when the
-    /// question is answered. Forms can hold any number of fields, so they are
-    /// answered in OpenChamber.
+    /// A card for each new question, up until it is answered. Forms can hold
+    /// any number of fields, so they are answered in OpenChamber.
     private func announceNewForms() {
         let current = Set(state.forms.map(\.id))
         for gone in announcedForms.subtracting(current) { host?.hud.dismiss(id: formHUDID(gone)) }
@@ -512,16 +525,19 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             if tab != .sessions { tab = .sessions }
             guard !openChamberIsInFront else { continue }
             let session = state.sessions[form.sessionID]
-            let meta = [session?.title, serverLabel(forSession: form.sessionID)].compactMap { $0 }.joined(separator: " · ")
+            let meta = [session?.project, serverLabel(forSession: form.sessionID)].compactMap { $0 }.joined(separator: " · ")
             _ = host.hud.present(DropletHUDRequest(
-                id: formHUDID(form.id), duration: 12, priority: .high,
-                accessibilityLabel: "\(session?.title ?? "A session") asks: \(form.title)", isExpanded: true, expandedContentHeight: 84
+                id: formHUDID(form.id), duration: nil, priority: .high,
+                accessibilityLabel: "\(session?.title ?? "A session") asks: \(form.title)", isExpanded: true, expandedContentHeight: 104
             ) {
                 NoticeStrip(motion: .waiting, symbol: "questionmark.bubble.fill", label: "Question", tint: .orange)
             } expanded: { [weak self] in
-                NoticeCard(title: form.title, meta: nil, detail: meta, detailStyle: .plain, action: "Answer in OpenChamber", accent: true) {
-                    self?.openSession(form.sessionID)
-                }
+                NoticeCard(
+                    provider: session?.providerID ?? "", symbol: "questionmark", tint: .orange,
+                    title: session?.title ?? "A session", status: "Asks", meta: meta, detail: form.title, style: .question,
+                    actions: [NoticeAction(title: "Answer in OpenChamber", role: .accent) { self?.openSession(form.sessionID) }],
+                    onOpen: { self?.openSession(form.sessionID) }
+                )
             })
         }
     }

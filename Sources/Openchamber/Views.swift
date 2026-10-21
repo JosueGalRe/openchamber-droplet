@@ -1048,47 +1048,6 @@ struct PermissionStrip: View {
     }
 }
 
-struct PermissionCard: View {
-    let permission: PendingPermission
-    let session: SessionInfo?
-    let onAllow: @MainActor () -> Void
-    let onReject: @MainActor () -> Void
-    let onOpen: @MainActor () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
-            // The card is 344pt wide on a notch and 208 on an island: the tool
-            // never truncates, the session title does.
-            HStack(spacing: DroppySpacing.xsm) {
-                Text(verbatim: permission.action)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    .layoutPriority(1)
-                Text(verbatim: session?.title ?? "")
-                    .font(.system(size: 11))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-            }
-            Text(permission.resources.joined(separator: "\n"))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                .lineLimit(2)
-                .truncationMode(.middle)
-            HStack(spacing: DroppySpacing.xsm) {
-                Button("Allow once", action: onAllow)
-                    .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
-                Button("Reject", action: onReject)
-                    .buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
-                Spacer(minLength: 0)
-                Button("Open", action: onOpen)
-                    .buttonStyle(DroppyQuietButtonStyle(size: .small))
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
 /// A turn's notice in the strip: OpenChamber's cube at the left edge, what
 /// happened at the right, nothing under the camera.
 struct NoticeStrip: View {
@@ -1111,66 +1070,85 @@ struct NoticeStrip: View {
     }
 }
 
-/// The card a notice grows into: who, what it said, and the way back to it.
-struct NoticeCard: View {
-    enum DetailStyle { case quote, code, plain }
-
+/// A button on a notice card. Only decisions get one; opening is the ↗.
+struct NoticeAction {
+    enum Role { case accent, destructive }
     let title: String
-    let meta: String?
+    let role: Role
+    let run: @MainActor () -> Void
+}
+
+/// Every card on the notch, laid out like Droppy's own battery and AirPods
+/// cards: whose it is and what happened up top (the agent's icon with a
+/// badge, the session, the state in its colour), then what it said or wants,
+/// then the decision, if there is one.
+struct NoticeCard: View {
+    enum Style { case text, code, question }
+
+    let provider: String
+    let symbol: String
+    let tint: Color
+    let title: String
+    let status: String
+    let meta: String
     let detail: String?
-    let detailStyle: DetailStyle
-    let action: String
-    var accent = false
-    let onAction: @MainActor () -> Void
+    let style: Style
+    var actions: [NoticeAction] = []
+    let onOpen: @MainActor () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
-            Text(verbatim: title)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                .lineLimit(detailStyle == .plain ? 2 : 1)
-            if let detail {
-                switch detailStyle {
-                case .quote:
-                    Text(detail)
-                        .font(.system(size: 12))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.leading, DroppySpacing.sm)
-                        .overlay(alignment: .leading) {
-                            Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
-                        }
-                case .code:
-                    Text(detail)
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .plain:
-                    Text(detail)
+        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+            HStack(spacing: DroppySpacing.smd) {
+                ZStack(alignment: .bottomTrailing) {
+                    AgentMark(provider: provider, size: 28)
+                    // A black ring of fill, not a stroke, parts the badge from the icon.
+                    ZStack {
+                        Circle().fill(Color.black).frame(width: 16, height: 16)
+                        Circle().fill(tint).frame(width: 12, height: 12)
+                        Image(systemName: symbol).font(.system(size: 7, weight: .heavy)).foregroundStyle(Color.black)
+                    }
+                    .offset(x: 5, y: 5)
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(verbatim: title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                        .lineLimit(1)
+                    (Text(verbatim: status).fontWeight(.semibold).foregroundStyle(tint)
+                        + Text(verbatim: meta.isEmpty ? "" : " · \(meta)").foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText))
                         .font(.system(size: 11))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        .monospacedDigit()
                         .lineLimit(1)
                 }
+                Spacer(minLength: DroppySpacing.sm)
+                Button(action: onOpen) {
+                    Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold))
+                }
+                .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                .help("Open in OpenChamber")
+                .accessibilityLabel("Open in OpenChamber")
             }
-            Spacer(minLength: 0)
-            HStack(spacing: DroppySpacing.xsm) {
-                if accent {
-                    Button(action, action: onAction)
-                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
-                    Spacer(minLength: 0)
-                } else {
-                    if let meta {
-                        Text(verbatim: meta)
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                            .lineLimit(1)
+            if let detail {
+                Text(detail)
+                    .font(style == .code ? .system(size: 11, design: .monospaced) : .system(size: 12))
+                    .foregroundStyle(style == .question ? AdaptiveColors.notchSurfacePrimaryText : AdaptiveColors.notchSurfaceSecondaryText)
+                    .lineLimit(2)
+                    .truncationMode(style == .code ? .middle : .tail)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !actions.isEmpty {
+                Spacer(minLength: 0)
+                HStack(spacing: DroppySpacing.xsm) {
+                    ForEach(actions.indices, id: \.self) { index in
+                        let action = actions[index]
+                        switch action.role {
+                        case .accent:
+                            Button(action.title, action: action.run).buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                        case .destructive:
+                            Button(action.title, action: action.run).buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                        }
                     }
                     Spacer(minLength: 0)
-                    Button(action, action: onAction)
-                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
                 }
             }
         }
