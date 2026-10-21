@@ -319,6 +319,7 @@ private struct SessionHero: View {
     /// Set when the hero was opened from the list: a tap folds it back, and
     /// OpenChamber opens only from its button.
     var collapse: (() -> Void)? = nil
+    @State private var showsDetail = false
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
@@ -343,31 +344,38 @@ private struct SessionHero: View {
                 .help("Open in OpenChamber")
                 .accessibilityLabel("Open in OpenChamber")
             }
-            HStack(spacing: DroppySpacing.sm) {
-                NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13)
-                if !compact {
-                    Spacer(minLength: DroppySpacing.md)
-                    Text(session?.project ?? "")
+            // What it is doing and its last words: the part with more to read.
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: DroppySpacing.sm) {
+                    NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13)
+                    if !compact {
+                        Spacer(minLength: DroppySpacing.md)
+                        Text(session?.project ?? "")
+                            .font(.system(size: 12))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(.leading, compact ? 0 : 28)
+                .padding(.top, DroppySpacing.xs)
+
+                Spacer(minLength: DroppySpacing.sm)
+
+                if !compact, lastTextLines > 0, let text = activity.lastText {
+                    Text(text)
                         .font(.system(size: 12))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        .lineLimit(1)
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        .lineLimit(lastTextLines)
+                        .padding(.leading, DroppySpacing.sm)
+                        .overlay(alignment: .leading) {
+                            Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
+                        }
+                        .padding(.bottom, DroppySpacing.sm)
                 }
             }
-            .padding(.leading, compact ? 0 : 28)
-            .padding(.top, DroppySpacing.xs)
-
-            Spacer(minLength: DroppySpacing.sm)
-
-            if !compact, lastTextLines > 0, let text = activity.lastText {
-                Text(text)
-                    .font(.system(size: 12))
-                    .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    .lineLimit(lastTextLines)
-                    .padding(.leading, DroppySpacing.sm)
-                    .overlay(alignment: .leading) {
-                        Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
-                    }
-                    .padding(.bottom, DroppySpacing.sm)
+            .contentShape(Rectangle())
+            .hoverCard(droplet: droplet, isPresented: $showsDetail) {
+                SessionDetail(droplet: droplet, sessionID: sessionID)
             }
 
             HStack(spacing: DroppySpacing.sm) {
@@ -748,14 +756,11 @@ private struct RingTile: View {
     let diameter: CGFloat
     let width: CGFloat
     @State private var showsDetail = false
-    @State private var overRing = false
-    @State private var overCard = false
-    @State private var pending: Task<Void, Never>?
 
     var body: some View {
         let left = provider.percentLeft ?? 100
         let line = diameter * 0.085
-        Button { setDetail(!showsDetail) } label: {
+        Button { showsDetail.toggle() } label: {
             VStack(spacing: DroppySpacing.xs) {
                 ZStack {
                     Circle().stroke(AdaptiveColors.notchSurfacePrimaryText.opacity(0.12), lineWidth: line)
@@ -783,32 +788,103 @@ private struct RingTile: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("\(provider.name), \(provider.caption)")
-        .onHover { overRing = $0; hoverChanged() }
-        .popover(isPresented: Binding(get: { showsDetail }, set: { setDetail($0) }), arrowEdge: .bottom) {
+        .hoverCard(droplet: droplet, isPresented: $showsDetail) {
             UsageDetail(droplet: droplet, provider: provider)
-                .onHover { overCard = $0; hoverChanged() }
         }
-        .onDisappear { setDetail(false) }
+    }
+}
+
+/// A card hanging under a view while the pointer is on either. It opens a
+/// beat after the pointer arrives, so sweeping across opens nothing, and
+/// closes a beat after it leaves both, so crossing the gap keeps it open.
+/// The shelf stays open while it shows, or leaving the shelf for the card
+/// would close the shelf under it.
+private struct HoverCard<Card: View>: ViewModifier {
+    let droplet: OpenchamberDroplet
+    @Binding var isPresented: Bool
+    @ViewBuilder let card: () -> Card
+    @State private var overAnchor = false
+    @State private var overCard = false
+    @State private var pending: Task<Void, Never>?
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { overAnchor = $0; hoverChanged() }
+            .popover(isPresented: $isPresented, arrowEdge: .bottom) {
+                card().onHover { overCard = $0; hoverChanged() }
+            }
+            .onChange(of: isPresented) { _, shown in droplet.holdShelfOpen(shown) }
+            // Gone with the card up: nothing else would let go of the shelf.
+            .onDisappear {
+                pending?.cancel()
+                if isPresented { isPresented = false; droplet.holdShelfOpen(false) }
+            }
     }
 
-    /// Opens a beat after the pointer arrives, so sweeping across the rings
-    /// opens nothing, and closes a beat after it leaves both the ring and the
-    /// card, so crossing the gap between them keeps it open.
     private func hoverChanged() {
         pending?.cancel()
-        let wanted = overRing || overCard
-        guard wanted != showsDetail else { return }
+        let wanted = overAnchor || overCard
+        guard wanted != isPresented else { return }
         pending = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(wanted ? 180 : 300))
             guard !Task.isCancelled else { return }
-            setDetail(wanted)
+            isPresented = wanted
         }
     }
+}
 
-    private func setDetail(_ shown: Bool) {
-        guard shown != showsDetail else { return }
-        showsDetail = shown
-        droplet.holdShelfOpen(shown)
+extension View {
+    fileprivate func hoverCard<Card: View>(droplet: OpenchamberDroplet, isPresented: Binding<Bool>, @ViewBuilder card: @escaping () -> Card) -> some View {
+        modifier(HoverCard(droplet: droplet, isPresented: isPresented, card: card))
+    }
+}
+
+/// More of a session than the shelf has room for: the whole command or path
+/// of the call it is in and its last words, each capped so the card stays a
+/// glance, not a transcript.
+private struct SessionDetail: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+    let sessionID: String
+
+    var body: some View {
+        let session = droplet.state.sessions[sessionID]
+        let activity = droplet.state.activity[sessionID] ?? SessionActivity()
+        let running = activity.calls.last { $0.mark == .running }
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(session?.title ?? "Session").font(.system(size: 15, weight: .semibold)).lineLimit(2)
+                Text([Formatting.runner(of: session, server: droplet.serverLabel(forSession: sessionID)), session?.project]
+                    .compactMap { $0 }.joined(separator: " · "))
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if let running {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Narration(call: running).verb).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                    if let target = running.target {
+                        Text(target)
+                            .font(.system(size: 12, design: .monospaced))
+                            .lineLimit(6)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            if let text = activity.lastText {
+                Text(text)
+                    .font(.system(size: 13))
+                    .lineLimit(10)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if activity.steps > 0 {
+                Text(verbatim: activity.steps == 1 ? "1 step this turn" : "\(activity.steps) steps this turn")
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .frame(width: 340, alignment: .leading)
     }
 }
 
