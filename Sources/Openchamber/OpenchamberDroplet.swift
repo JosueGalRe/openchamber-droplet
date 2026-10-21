@@ -344,18 +344,27 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     }
 
     /// Opens the session in OpenChamber Desktop. Desktop shows one host at a
-    /// time, so a remote server's session switches Desktop to that host first;
-    /// Desktop holds the session link until the switched window can take it.
+    /// time and a session link names no host, so a remote server's session
+    /// switches Desktop to that host first and sends the session once the
+    /// switch has had time to land: Desktop looks the session up on whatever
+    /// host it shows the moment the link arrives, and a relay host is switched
+    /// in its renderer, well after that.
     func openSession(_ id: String) {
         guard let url = URL(string: "openchamber://session/\(id)") else { return }
         // shortcut: Droppy's workspace.open refuses every scheme but http(s), mailto and file, and DroppyKit has no way to declare one, so this personal droplet opens the link itself; a Store build needs Droppy to allow openchamber://.
-        // shortcut: a local session does not switch Desktop back from a remote host, since the switch reloads the window even when it is already there; send openchamber://host/local first if that bites.
-        if let serverID = serverID(forSession: id), serverID != ChamberServer.localID,
-           let hostID = serverID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-           let hostURL = URL(string: "openchamber://host/\(hostID)") {
-            NSWorkspace.shared.open(hostURL)
+        guard let serverID = serverID(forSession: id), serverID != ChamberServer.localID,
+              let hostID = serverID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let hostURL = URL(string: "openchamber://host/\(hostID)") else {
+            // shortcut: a local session does not switch Desktop back from a remote host, since the switch reloads the window even when it is already there; send openchamber://host/local first if that bites.
+            NSWorkspace.shared.open(url)
+            return
         }
-        NSWorkspace.shared.open(url)
+        NSWorkspace.shared.open(hostURL)
+        // shortcut: a fixed wait for Desktop's host switch, since nothing tells us it finished; upgrade by teaching Desktop openchamber://session/<id>?host=<id> (dispatchDeepLink → openHostWindow).
+        Task {
+            try? await Task.sleep(for: .seconds(3))
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// Keeps the shelf open while a usage card hangs below it, so moving the
