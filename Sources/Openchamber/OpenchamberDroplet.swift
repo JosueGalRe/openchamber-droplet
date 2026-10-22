@@ -343,28 +343,43 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         Task { try? await client.interrupt(sessionID: sessionID, directory: directory) }
     }
 
-    /// Opens the session in OpenChamber Desktop. Desktop shows one host at a
-    /// time and a session link names no host, so a remote server's session
-    /// switches Desktop to that host first and sends the session once the
-    /// switch has had time to land: Desktop looks the session up on whatever
-    /// host it shows the moment the link arrives, and a relay host is switched
-    /// in its renderer, well after that.
+    /// Opens the session in OpenChamber Desktop, on the instance that owns it:
+    /// the link names it, and Desktop opens the session there, in place or in
+    /// that instance's window.
+    ///
+    /// Desktop 2.5.0 and older ignore the name and look the session up on
+    /// whatever instance the main window shows when the link arrives. For
+    /// them a remote session switches the window to its host first and sends
+    /// the session once the switch has had time to land; a relay host is
+    /// switched in the renderer, well after the link would have been read.
     func openSession(_ id: String) {
-        guard let url = URL(string: "openchamber://session/\(id)") else { return }
         // shortcut: Droppy's workspace.open refuses every scheme but http(s), mailto and file, and DroppyKit has no way to declare one, so this personal droplet opens the link itself; a Store build needs Droppy to allow openchamber://.
-        guard let serverID = serverID(forSession: id), serverID != ChamberServer.localID,
-              let hostID = serverID.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let hostURL = URL(string: "openchamber://host/\(hostID)") else {
+        let serverID = serverID(forSession: id)
+        if let version = Self.installedDesktopVersion, DesktopLinks.namesHosts(version: version) {
+            if let url = DesktopLinks.session(id, host: serverID) { NSWorkspace.shared.open(url) }
+            return
+        }
+
+        // shortcut: the switch-and-wait below is for Desktop 2.5.0 and older; delete it once that version is gone.
+        guard let url = DesktopLinks.session(id, host: nil) else { return }
+        guard let serverID, serverID != ChamberServer.localID, let hostURL = DesktopLinks.host(serverID) else {
             // shortcut: a local session does not switch Desktop back from a remote host, since the switch reloads the window even when it is already there; send openchamber://host/local first if that bites.
             NSWorkspace.shared.open(url)
             return
         }
         NSWorkspace.shared.open(hostURL)
-        // shortcut: a fixed wait for Desktop's host switch, since nothing tells us it finished; upgrade by teaching Desktop openchamber://session/<id>?host=<id> (dispatchDeepLink → openHostWindow).
+        // shortcut: a fixed wait for Desktop's host switch, since nothing tells us it finished.
         Task {
             try? await Task.sleep(for: .seconds(3))
             NSWorkspace.shared.open(url)
         }
+    }
+
+    /// The installed Desktop's version, read from disk each time: Desktop
+    /// updates itself while Droppy keeps running.
+    private static var installedDesktopVersion: String? {
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopLinks.bundleID) else { return nil }
+        return NSDictionary(contentsOf: app.appending(path: "Contents/Info.plist"))?["CFBundleShortVersionString"] as? String
     }
 
     /// Keeps the shelf open while a usage card hangs below it, so moving the
@@ -479,7 +494,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     /// OpenChamber in front already shows what the cards would say.
     private var openChamberIsInFront: Bool {
-        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "dev.openchamber.desktop"
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier == DesktopLinks.bundleID
     }
 
     /// A card when a turn ends or fails, the way OpenChamber's own notifications

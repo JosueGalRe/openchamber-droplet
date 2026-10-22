@@ -59,6 +59,37 @@ enum Route: Sendable {
 /// shortcut: reads Desktop's private settings file, which is fine for one
 /// person's Mac and would not pass Store review; a Store build would pair each
 /// server instead.
+/// The `openchamber://` links OpenChamber Desktop opens.
+enum DesktopLinks {
+    static let bundleID = "dev.openchamber.desktop"
+
+    /// `openchamber://session/<id>?host=<id>`. Desktop after 2.5.0 opens it on
+    /// the instance it names, in place or in that instance's own window
+    /// (openchamber/openchamber#5366); `local` is Desktop's own server.
+    static func session(_ id: String, host: String?) -> URL? {
+        var link = URLComponents()
+        link.scheme = "openchamber"
+        link.host = "session"
+        link.path = "/" + id
+        if let host { link.queryItems = [URLQueryItem(name: "host", value: host)] }
+        return link.url
+    }
+
+    /// `openchamber://host/<id>`: switches Desktop's main window to that instance.
+    static func host(_ id: String) -> URL? {
+        var link = URLComponents()
+        link.scheme = "openchamber"
+        link.host = "host"
+        link.path = "/" + id
+        return link.url
+    }
+
+    /// Whether a Desktop of this version reads `?host=`: every release after 2.5.0.
+    static func namesHosts(version: String) -> Bool {
+        version.compare("2.5.0", options: .numeric) == .orderedDescending
+    }
+}
+
 enum DesktopServers {
     static var settingsFile: URL {
         FileManager.default.homeDirectoryForCurrentUser.appending(path: ".config/openchamber/settings.json")

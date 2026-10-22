@@ -135,3 +135,14 @@ private var relay: [String: Any] { [
     #expect(copilot.percentLeft == nil)
     #expect(claude.caption == "80% left")
 }
+
+@Test func sessionLinksNameTheirHostForDesktopsThatReadIt() {
+    #expect(DesktopLinks.session("ses_1", host: "9bc34f85-c5be") == URL(string: "openchamber://session/ses_1?host=9bc34f85-c5be"))
+    #expect(DesktopLinks.session("ses_1", host: "local") == URL(string: "openchamber://session/ses_1?host=local"))
+    #expect(DesktopLinks.session("ses_1", host: nil) == URL(string: "openchamber://session/ses_1"))
+    #expect(DesktopLinks.host("9bc34f85-c5be") == URL(string: "openchamber://host/9bc34f85-c5be"))
+    #expect(!DesktopLinks.namesHosts(version: "2.5.0"))
+    #expect(!DesktopLinks.namesHosts(version: "2.4.12"))
+    #expect(DesktopLinks.namesHosts(version: "2.5.1"))
+    #expect(DesktopLinks.namesHosts(version: "2.10.0"))
+}

@@ -115,8 +115,10 @@ end-to-end encrypted relay when no direct address answers.
 
 - **REST** under `/api` for sessions, permission and question replies, and quotas.
 - **Events** over `/api/global/event/ws`, resumed from the last event after a reconnect.
-- **Opening a session** goes through `openchamber://` deep links, switching Desktop to the
-  session's host first.
+- **Opening a session** goes through `openchamber://session/<id>?host=<id>`, which Desktop
+  opens on the instance that owns the session
+  ([openchamber#5366](https://github.com/openchamber/openchamber/pull/5366), in releases
+  after 2.5.0). With 2.5.0 and older, the droplet switches Desktop to the session's host first.
 
 > [!IMPORTANT]
 > This is a personal droplet. Reading Desktop's settings file and opening `openchamber://`
