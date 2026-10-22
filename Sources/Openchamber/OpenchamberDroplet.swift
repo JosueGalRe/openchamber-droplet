@@ -758,7 +758,7 @@ private extension OpenchamberDroplet {
         }
         local.activity.apply(.toolStarted(sessionID: "s1", callID: "c9", name: "edit"))
         local.activity.apply(.toolCalled(sessionID: "s1", callID: "c9", name: nil, target: "session-runtime.js"))
-        local.activity.apply(.textEnded(sessionID: "s1", text: "23/23. Build, validate y shots del tab Sessions; luego del de Usage."))
+        local.activity.apply(.textEnded(sessionID: "s1", text: "23/23 tests pass. Next: build, validate and the shots of the Sessions page."))
         local.activity.apply(.executionStarted(sessionID: "s2", at: now.addingTimeInterval(-48)))
         local.activity.apply(.permissionAsked(PendingPermission(
             id: "p1", sessionID: "s2", action: "bash",
@@ -777,7 +777,7 @@ private extension OpenchamberDroplet {
         ]
 
         var work = ServerState(connection: .live)
-        work.activity.apply(.sessionsListed([SessionInfo(id: "w1", title: "Kiro migration", directory: "/home/bryan/work/api", parentID: nil)]))
+        work.activity.apply(.sessionsListed([SessionInfo(id: "w1", title: "API migration", directory: "/home/me/work/api", parentID: nil)]))
         work.activity.apply(.executionStarted(sessionID: "w1", at: now.addingTimeInterval(-610)))
         work.usage = [
             ProviderQuota(id: "codex", provider: "codex", name: "Codex", plan: "Pro", windows: [
