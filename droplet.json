@@ -28,14 +28,13 @@
   ],
   "icon": "Openchamber.icon",
   "creator": {
-    "name": "Your name",
+    "name": "Bryan Galdámez",
     "kind": "community",
-    "url": "https://example.com",
-    "avatar": "Creator.png",
-    "gitlab": "your-gitlab-username"
+    "url": "https://github.com/JosueGalRe",
+    "avatar": "Creator.png"
   },
   "source": {
-    "repository": "https://gitlab.com/droppyformac1/droplets/-/tree/main/droplets/openchamber",
+    "repository": "https://github.com/JosueGalRe/openchamber-droplet",
     "license": "MIT"
   },
   "screenshots": [],
