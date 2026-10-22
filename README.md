@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/sessions.png" width="680" alt="The shelf widget under the notch: three sessions running, each with what it is doing, its server and project, and how long its turn has run">
+  <img src="docs/images/demo.gif" width="680" alt="Recorded on a MacBook's notch: hovering the notch shows three running sessions; a card drops asking to run pnpm test, Allow once answers it, and a Done card follows with what the session found">
 </p>
 
 A [Droplet](https://getdroppy.app/docs/droppykit) for [Droppy](https://getdroppy.app), the
@@ -29,6 +29,10 @@ whether a session is done, stuck or waiting on you.
 
 ### Sessions, narrated
 
+<p align="center">
+  <img src="docs/images/sessions.png" width="680" alt="The shelf widget under the notch: three sessions running, each with what it is doing, its server and project, and how long its turn has run">
+</p>
+
 Every running session gets a row: its title, what it is doing in plain words (*Running
 swift test*, *Editing Views.swift*, *Thinking…*), the server and project it runs in, and how
 long the turn has taken. Sessions from this Mac and your remote hosts sit side by side.
@@ -38,7 +42,7 @@ session to open it in OpenChamber Desktop, on the right host.
 ### Approvals without switching apps
 
 <p align="center">
-  <img src="docs/images/notch-card.png" width="680" alt="A card on the notch: Design the droplet wants to run swift build -c release --product Openchamber, with Allow once and Reject">
+  <img src="docs/images/real-card.png" width="466" alt="A card on the notch: Fix the flaky date test wants to run pnpm test, with Allow once and Reject">
 </p>
 
 When an agent asks for permission, a card drops from the notch with the exact command.
@@ -52,10 +56,14 @@ widget keeps every pending request, with **Always** for the ones you trust.
 Cards also tell you when a turn ends, fails or asks you a question. They stay quiet while
 OpenChamber is the app in front, and each kind has its own switch.
 
+<p align="center">
+  <img src="docs/images/real-done.png" width="466" alt="A Done card on the notch: Fix the flaky date test, done in 0:20, with the start of the session's last message">
+</p>
+
 ### Plan usage at a glance
 
 <p align="center">
-  <img src="docs/images/usage.png" width="680" alt="The Usage page: a ring per provider, Claude 93% left, OpenCode Go 97% left, Codex 100% left">
+  <img src="docs/images/real-usage.png" width="551" alt="The Usage page: a ring per provider with its logo, Claude 59% left, Codex 100% left, OpenCode Go 96% left, GitHub Copilot unlimited">
 </p>
 
 The Usage page shows a ring per provider with what is left of its tightest window. Hover a
@@ -94,8 +102,8 @@ a switch per kind of notch card. Two global shortcuts, which you bind in Droppy:
 oldest OpenChamber request once** and **Open the OpenChamber session that needs you**.
 
 > [!NOTE]
-> The pictures come from the DroppyKit harness with sample data. Inside Droppy the usage
-> rings carry each provider's logo instead of a letter.
+> The animation and the card, Done and Usage pictures were recorded on a MacBook's notch,
+> with demo sessions. The rest come from the DroppyKit harness with sample data.
 
 ## How it connects
 
@@ -159,6 +167,11 @@ droppykit run -- --shots ./shots --report ./shots/report.json
 
 `OPENCHAMBER_LIVE_RELAY=1 swift test --filter liveRelay` runs one test against a real
 remote host through the relay, with Desktop's settings on your Mac.
+
+`scripts/demo-take.sh` records the animation at the top: it starts throwaway sessions on
+this Mac's OpenChamber, asks for a permission mid-take, and records the display with
+[OpenScreen](https://github.com/getopenscreen/openscreen) and ffmpeg. Its header says what it
+needs.
 
 | File | What's in it |
 | --- | --- |
