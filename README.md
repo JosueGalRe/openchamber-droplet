@@ -10,8 +10,8 @@
 
 <p align="center">
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
-  <img alt="Droppy 15.3+" src="https://img.shields.io/badge/Droppy-15.3%2B-5E5CE6">
-  <img alt="DroppyKit 1.9" src="https://img.shields.io/badge/DroppyKit-1.9-5E5CE6">
+  <img alt="Droppy 16.0.1+" src="https://img.shields.io/badge/Droppy-16.0.1%2B-5E5CE6">
+  <img alt="DroppyKit 1.19" src="https://img.shields.io/badge/DroppyKit-1.19-5E5CE6">
   <img alt="Swift 6.2" src="https://img.shields.io/badge/Swift-6.2-F05138?logo=swift&logoColor=white">
   <img alt="MIT license" src="https://img.shields.io/badge/license-MIT-lightgrey">
 </p>
@@ -68,6 +68,25 @@ switch.
   <img src="docs/images/real-done.png" width="466" alt="A Done card on the notch: Fix the flaky date test, done in 0:20, with the start of the session's last message">
 </p>
 
+### Talking back without a window
+
+A finished or failed turn's card has one-click replies (*Commit it*, *Run the tests*,
+*Continue*, your own in settings) and, when the turn changed files, an undo that asks first
+and can be brought back until the session's next message. A permission card can **Let it
+run 15m**: the session's requests are approved for a quarter of an hour, a yellow ring
+counts it down beside the notch, and then it asks again. Bind **Talk to the OpenChamber
+session that needs you**, press it, speak, press it again: the words go to the session. Drop
+files on a session to hand them over.
+
+### Noticing what you'd miss
+
+A session quiet for five minutes, one command running for ten, or the same call failing
+three times gets a yellow card with Stop. Come back from a locked or sleeping screen, or ten
+minutes away, to one card of what finished and what waits on you, a headline a turn. If you
+turn it on, copying a stack trace or a compiler error offers to send it to the session it
+belongs to; nothing leaves until you press Send. **Hide commands and messages** keeps them
+off the notch while you share your screen, from settings or a shortcut.
+
 ### Plan usage at a glance
 
 <p align="center">
@@ -107,8 +126,18 @@ resets. You get a notice on the notch as a window passes 80% and again at 95%.
 </p>
 
 Droppy's settings page for the droplet lists every server with its connection state and has
-a switch per kind of notch card. Two global shortcuts, which you bind in Droppy: **Allow the
-oldest OpenChamber request once** and **Open the OpenChamber session that needs you**.
+a switch per kind of notch card, the quick replies, voice, the recap, privacy and links.
+Four global shortcuts, which you bind in Droppy: **Allow the oldest OpenChamber request
+once**, **Open the OpenChamber session that needs you**, **Talk to the OpenChamber session
+that needs you** and **Hide OpenChamber's commands and messages**.
+
+### Links for Raycast, Shortcuts and scripts
+
+`droppy://droplet/openchamber/<action>` drives the droplet from anything that opens a URL:
+`new?project=api&prompt=…` starts a session, `reply?text=…`, `approve`, `stop` and `voice`
+act on the session that needs you (or `session=<id>`), `open` and `focus` show it. Every
+web page can open that scheme, so all but `open` and `focus` need `token=`, the secret in
+settings, where **Copy example** puts a ready command on the clipboard.
 
 > [!NOTE]
 > The animation and the card, Done and Usage pictures were recorded on a MacBook's notch,
@@ -137,7 +166,7 @@ end-to-end encrypted relay when no direct address answers.
 
 ## Install
 
-You need macOS 14 or later, [Droppy](https://getdroppy.app) 15.3 or later (or the free
+You need macOS 14 or later, [Droppy](https://getdroppy.app) 16.0.1 or later (or the free
 [Droppy Playground](https://getdroppy.app/download/playground)), Xcode with Swift 6.2, and
 OpenChamber Desktop set up with at least one server.
 
@@ -193,6 +222,8 @@ needs.
 | `Sources/Openchamber/ActivityState.swift` | Wire events reduced to sessions, requests and narration |
 | `Sources/Openchamber/Views.swift` | The widget, cards, usage rings, the full-shelf session and the settings pane |
 | `Sources/Openchamber/AgentMascot.swift` | The agents' mascots for the notch, drawn after Droppy's own |
+| `Sources/Openchamber/VoiceReply.swift` | Dictation for a voice reply: the microphone into the speech recognizer |
+| `Sources/Openchamber/Watchers.swift` | Stepping away and coming back, and errors you copy |
 | `droplet.json` | The manifest; `Info.plist` is generated from it |
 
 `AGENTS.md` is the brief for coding agents, and `.mcp.json` connects the DroppyKit MCP
