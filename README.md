@@ -34,10 +34,16 @@ whether a session is done, stuck or waiting on you.
 </p>
 
 Every running session gets a row: its title, what it is doing in plain words (*Running
-swift test*, *Editing Views.swift*, *Thinking…*), the server and project it runs in, and how
+swift test*, *Editing Views.swift*, *Writing…*), the server and project it runs in, and how
 long the turn has taken. Sessions from this Mac and your remote hosts sit side by side.
-Hover what a session is doing to read the whole command and its last message; click a
-session to open it in OpenChamber Desktop, on the right host.
+A session on its own shows its words as the agent writes them, its model by name
+(*Opus 5.5 xhigh*, not `claude-opus-5-5`) and how full its context window is. Hover what a
+session is doing to read the whole command and its last message; click a session to open
+it in OpenChamber Desktop, on the right host, or expand it over the whole shelf for every
+step of the turn, its full last message and Stop.
+
+With nothing running, the widget shows what your agents did today: turns, agent time,
+requests answered and lines changed.
 
 ### Approvals without switching apps
 
@@ -53,8 +59,10 @@ widget keeps every pending request, with **Always** for the ones you trust.
   <img src="docs/images/permission.png" width="680" alt="The shelf widget with a pending request on top: Allow once, Always and Reject, and the other running session below">
 </p>
 
-Cards also tell you when a turn ends, fails or asks you a question. They stay quiet while
-OpenChamber is the app in front, and each kind has its own switch.
+Cards also tell you when a turn ends, with the lines and files it changed, when it fails,
+and when it asks you a question; a question with a short list of answers is answered from
+its card. They stay quiet while OpenChamber is the app in front, and each kind has its own
+switch.
 
 <p align="center">
   <img src="docs/images/real-done.png" width="466" alt="A Done card on the notch: Fix the flaky date test, done in 0:20, with the start of the session's last message">
@@ -66,9 +74,10 @@ OpenChamber is the app in front, and each kind has its own switch.
   <img src="docs/images/real-usage.png" width="551" alt="The Usage page: a ring per provider with its logo, Claude 59% left, Codex 100% left, OpenCode Go 96% left, GitHub Copilot unlimited">
 </p>
 
-The Usage page shows a ring per provider with what is left of its tightest window. Hover a
-ring for every window and when it resets. You get a notice on the notch as a window passes
-80% and again at 95%.
+The Usage page shows a ring per provider with what is left of its tightest window. A mark on
+the ring shows where an even pace would be by now, and the line under it says when the
+window runs out if that comes before it resets. Hover a ring for every window and when it
+resets. You get a notice on the notch as a window passes 80% and again at 95%.
 
 ### Everywhere else Droppy lives
 
@@ -80,7 +89,7 @@ ring for every window and when it resets. You get a notice on the notch as a win
     </td>
     <td align="center" width="58%">
       <img src="docs/images/live-activity.png" width="400" alt="The live activity beside the notch: the OpenChamber glyph and a raised hand with a count of 1"><br>
-      <sub><b>Live activity</b>: how many sessions need you, beside the notch</sub>
+      <sub><b>Live activity</b>: the agent's mascot at work, and a dot per session, orange for one that needs you</sub>
     </td>
   </tr>
   <tr>
@@ -113,7 +122,8 @@ There is nothing to pair. The droplet reads the servers
 client tokens Desktop already holds. It talks to each one directly, or through OpenChamber's
 end-to-end encrypted relay when no direct address answers.
 
-- **REST** under `/api` for sessions, permission and question replies, and quotas.
+- **REST** under `/api` for sessions, permission and question replies, quotas, the model
+  catalog, a turn's diff and a project's branch.
 - **Events** over `/api/global/event/ws`, resumed from the last event after a reconnect.
 - **Opening a session** goes through `openchamber://session/<id>?host=<id>`, which Desktop
   opens on the instance that owns the session
@@ -181,7 +191,8 @@ needs.
 | `Sources/Openchamber/OpenChamberClient.swift` | Desktop's servers, REST and the event socket |
 | `Sources/Openchamber/RelayTunnel.swift` | The encrypted tunnel through OpenChamber's relay |
 | `Sources/Openchamber/ActivityState.swift` | Wire events reduced to sessions, requests and narration |
-| `Sources/Openchamber/Views.swift` | The widget, cards, usage rings and settings pane |
+| `Sources/Openchamber/Views.swift` | The widget, cards, usage rings, the full-shelf session and the settings pane |
+| `Sources/Openchamber/AgentMascot.swift` | The agents' mascots for the notch, drawn after Droppy's own |
 | `droplet.json` | The manifest; `Info.plist` is generated from it |
 
 `AGENTS.md` is the brief for coding agents, and `.mcp.json` connects the DroppyKit MCP
