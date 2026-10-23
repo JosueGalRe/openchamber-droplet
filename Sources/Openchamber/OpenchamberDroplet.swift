@@ -969,6 +969,13 @@ extension OpenchamberDroplet: ShelfWidgetProviding {
 
 // MARK: - Expanded surface
 
+/// How Droppy finds the surfaces: it casts the droplet to this and asks for
+/// the provider. The harness reads `ExpandedSurfaceProviding` directly, so
+/// without this the shots show the surface and Droppy refuses to present it.
+extension OpenchamberDroplet: ExpandedSurfaceHosting {
+    public var expandedSurfaceProvider: (any ExpandedSurfaceProviding)? { self }
+}
+
 extension OpenchamberDroplet: ExpandedSurfaceProviding {
     public var expandedSurfaces: [ExpandedSurfaceDescriptor] {
         // Read, not pointed at: the shelf must not close while the pointer is elsewhere.
