@@ -170,6 +170,44 @@ enum DesktopServers {
     }
 }
 
+/// A model as the server's catalog lists it.
+struct CatalogModel: Equatable, Sendable {
+    let name: String
+    /// The context window and the output limit, in tokens; 0 when unknown.
+    var context = 0
+    var output = 0
+
+    /// How full the window is at `tokens`, as OpenChamber shows it: against
+    /// the window less the room it keeps for output, which is at most 32k.
+    func contextShare(of tokens: Int) -> Double? {
+        guard context > 0 else { return nil }
+        let reserve = min(output > 0 ? output : 32_000, 32_000, context)
+        return min(1, Double(tokens) / Double(max(context - reserve, 1)))
+    }
+}
+
+/// The lines and files a turn changed.
+struct TurnDiff: Equatable, Sendable, Codable {
+    var files = 0
+    var additions = 0
+    var deletions = 0
+
+    var isEmpty: Bool { files == 0 }
+
+    init(files: Int = 0, additions: Int = 0, deletions: Int = 0) {
+        self.files = files
+        self.additions = additions
+        self.deletions = deletions
+    }
+
+    /// One `FileDiffInfo` per file, as `session.diff` returns them.
+    init(files: [[String: Any]]) {
+        self.files = files.count
+        additions = files.compactMap { ($0["additions"] as? NSNumber)?.intValue }.reduce(0, +)
+        deletions = files.compactMap { ($0["deletions"] as? NSNumber)?.intValue }.reduce(0, +)
+    }
+}
+
 struct QuotaWindow: Equatable, Sendable, Identifiable {
     var id: String { "\(model ?? "").\(name)" }
     /// OpenChamber's key for the window: `5h`, `7d`, `extra_usage`, …
@@ -181,6 +219,27 @@ struct QuotaWindow: Equatable, Sendable, Identifiable {
     let resetAt: Date?
     /// What a window without a percentage shows instead, such as a credit balance.
     var valueLabel: String? = nil
+
+    /// Where usage would be by now if it were spread evenly over the window,
+    /// and when it runs out at the rate so far, if that comes before the reset.
+    /// Nil without a length and a reset, and in a window's first 3%, where a
+    /// rate says nothing yet (CodexBar's threshold).
+    func pace(at now: Date) -> UsagePace? {
+        guard let used = usedPercent, let length = windowSeconds, length > 0, let resetAt else { return nil }
+        let elapsed = length - resetAt.timeIntervalSince(now)
+        let fraction = min(1, elapsed / length)
+        guard fraction >= 0.03 else { return nil }
+        guard used < 100 else { return UsagePace(expected: fraction * 100, runsOut: now) }
+        let runsOut = used > 0 ? now.addingTimeInterval((100 - used) * elapsed / used) : nil
+        return UsagePace(expected: fraction * 100, runsOut: runsOut.flatMap { $0 < resetAt ? $0 : nil })
+    }
+}
+
+struct UsagePace: Equatable, Sendable {
+    /// Percent of the window used if usage were even, 0 through 100.
+    let expected: Double
+    /// Set when the window runs dry before it resets.
+    let runsOut: Date?
 }
 
 struct ProviderQuota: Equatable, Sendable, Identifiable {
@@ -208,6 +267,9 @@ struct ProviderQuota: Equatable, Sendable, Identifiable {
         if let left = percentLeft { return "\(Int(left.rounded()))% left" }
         return windows.compactMap(\.valueLabel).first ?? "–"
     }
+
+    /// The pace of the window the ring shows.
+    func pace(at now: Date) -> UsagePace? { tightest?.pace(at: now) }
 
     /// One server's providers, without the ones that repeat another's windows
     /// exactly: OpenChamber lists Copilot twice (`github-copilot` and
@@ -269,6 +331,50 @@ actor OpenChamberClient {
     func session(id: String) async throws -> SessionInfo? {
         let body = try await json("GET", "api/session/\(id.urlPathEncoded)") as? [String: Any]
         return (body?["data"] as? [String: Any]).flatMap(ActivityWire.session(from:))
+    }
+
+    /// The catalog's models (`Opus 5.5` and its window), keyed `provider/model`
+    /// the way a session records its model. `GET /api/model` is read through a
+    /// project; asked without one, OpenCode would start a location of its own.
+    func models(directory: String) async throws -> [String: CatalogModel] {
+        Self.models(from: try await json("GET", "api/model", directory: directory))
+    }
+
+    static func models(from body: Any?) -> [String: CatalogModel] {
+        ((body as? [String: Any])?["data"] as? [[String: Any]] ?? []).reduce(into: [:]) { models, model in
+            guard let provider = model["providerID"] as? String, let id = model["id"] as? String,
+                  let name = model["name"] as? String, !name.isEmpty else { return }
+            let limit = model["limit"] as? [String: Any]
+            models["\(provider)/\(id)"] = CatalogModel(
+                name: name,
+                context: (limit?["context"] as? NSNumber)?.intValue ?? 0,
+                output: (limit?["output"] as? NSNumber)?.intValue ?? 0
+            )
+        }
+    }
+
+    /// What a turn changed: `GET /api/session/:id/diff?from=` the user message
+    /// that started it, which OpenCode answers with every file since.
+    func turnDiff(sessionID: String, from promptID: String, directory: String?) async throws -> TurnDiff {
+        let body = try await json("GET", "api/session/\(sessionID.urlPathEncoded)/diff",
+                                  query: [URLQueryItem(name: "from", value: promptID)], directory: directory)
+        return TurnDiff(files: (body as? [String: Any])?["data"] as? [[String: Any]] ?? [])
+    }
+
+    /// The branch a project is on, from `GET /api/vcs`; nil outside git.
+    func branch(directory: String) async throws -> String? {
+        let body = try await json("GET", "api/vcs", directory: directory) as? [String: Any]
+        return ((body?["data"] as? [String: Any])?["branch"] as? [String: Any])?["current"] as? String
+    }
+
+    /// Answers a one-pick form with the chosen option's value.
+    func answer(_ form: PendingForm, key: String, value: String) async throws {
+        _ = try await json(
+            "POST",
+            "api/session/\(form.sessionID.urlPathEncoded)/form/\(form.id.urlPathEncoded)/reply",
+            directory: form.directory,
+            body: ["answer": [key: value]]
+        )
     }
 
     /// `decision` is OpenCode's `once`, `always` or `reject`.

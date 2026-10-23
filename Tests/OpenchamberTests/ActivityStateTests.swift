@@ -195,7 +195,98 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
 @Test func theRunnerNamesModelProfileAndServer() {
     let session = SessionInfo(id: "s1", title: "T", directory: "/r", parentID: nil, providerID: "kiro", modelID: "kiro/claude-sonnet-4.5", agent: "build")
     #expect(Formatting.runner(of: session, server: "devbox") == "claude-sonnet-4.5 · Build · devbox")
+    #expect(Formatting.runner(of: session, model: "Sonnet 4.5", server: "devbox") == "Sonnet 4.5 · Build · devbox")
+    var reasoning = session
+    reasoning.variant = "xhigh"
+    #expect(Formatting.runner(of: reasoning, model: "Sonnet 4.5", server: nil) == "Sonnet 4.5 xhigh · Build")
+    reasoning.variant = "default"
+    #expect(Formatting.runner(of: reasoning, model: "Sonnet 4.5", server: nil) == "Sonnet 4.5 · Build")
     #expect(Formatting.runner(of: SessionInfo(id: "s2", title: "T", directory: "/r", parentID: nil, providerID: "claude-code"), server: nil) == "Claude")
+}
+
+@Test func aTurnStreamsItsWordsAndCarriesItsContextAndPrompt() {
+    var state = state(after: [
+        wire("session.inbox.delivered", ["sessionID": "s1", "inboxID": "msg_prompt"]),
+        wire("session.execution.started", ["sessionID": "s1"]),
+        wire("session.text.started", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0]),
+        wire("session.text.delta", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0, "delta": "The tests "]),
+        wire("session.text.delta", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0, "delta": "failed"]),
+        wire("session.step.ended", ["sessionID": "s1", "tokens": ["input": 1_000, "output": 200, "reasoning": 0, "cache": ["read": 40_000, "write": 800]]]),
+    ])
+    #expect(state.activity["s1"]?.liveText == "The tests failed")
+    #expect(state.activity["s1"]?.narration == .writing)
+    #expect(state.activity["s1"]?.contextTokens == 42_000)
+    #expect(state.activity["s1"]?.promptID == "msg_prompt")
+
+    state.apply(ActivityWire.event(from: wire("session.text.ended", ["sessionID": "s1", "text": "The tests failed."]), now: t0)!)
+    #expect(state.activity["s1"]?.liveText == nil)
+    #expect(state.activity["s1"]?.lastText == "The tests failed.")
+    #expect(state.activity["s1"]?.narration == .thinking)
+
+    // The server's own total wins over the parts, which add up every round trip.
+    #expect(ActivityWire.contextTokens(of: ["total": 9_000, "input": 1, "cache": ["read": 99_999]]) == 9_000)
+
+    state.apply(ActivityWire.event(from: wire("session.compaction.started", ["sessionID": "s1", "reason": "auto", "recent": ""]), now: t0)!)
+    #expect(state.activity["s1"]?.narration == .compacting)
+    state.apply(ActivityWire.event(from: wire("session.compaction.ended", ["sessionID": "s1", "reason": "auto", "recent": "", "text": "…"]), now: t0)!)
+    #expect(state.activity["s1"]?.narration == .thinking)
+    #expect(state.activity["s1"]?.contextTokens == nil)
+}
+
+@Test func aBranchUpdateLandsOnItsProject() {
+    let state = state(after: [wire("vcs.branch.updated", directory: "/r/app", ["branch": "fix/utc"])])
+    #expect(state.branches["/r/app"] == "fix/utc")
+}
+
+@Test func aOnePickFormBecomesButtonsWithTheRecommendedFirst() {
+    let form = ActivityWire.form(from: [
+        "id": "f1", "sessionID": "s1", "title": "Questions",
+        "fields": [["key": "tz", "type": "string", "title": "Which timezone?", "custom": true, "options": [
+            ["value": "local", "label": "The user's timezone"],
+            ["value": "utc", "label": "UTC everywhere (Recommended)"],
+        ]]],
+    ], directory: nil)
+    #expect(form?.choice == FormChoice(key: "tz", options: [
+        .init(value: "utc", label: "UTC everywhere", recommended: true),
+        .init(value: "local", label: "The user's timezone", recommended: false),
+    ], custom: true))
+
+    // Two fields, or a field without options, are answered in OpenChamber.
+    let two = ActivityWire.form(from: ["id": "f2", "sessionID": "s1", "fields": [
+        ["key": "a", "type": "string", "options": [["value": "x", "label": "X"]]],
+        ["key": "b", "type": "boolean"],
+    ]], directory: nil)
+    #expect(two?.choice == nil)
+    #expect(ActivityWire.form(from: ["id": "f3", "sessionID": "s1", "fields": [["key": "a", "type": "string"]]], directory: nil)?.choice == nil)
+}
+
+@Test func finishedCallsReadInThePastTense() {
+    #expect(Narration(call: ToolCall(id: "c", name: "bash", target: "pnpm test", mark: .succeeded)).pastVerb == "Ran")
+    #expect(Narration(call: ToolCall(id: "c", name: "edit", target: "a.swift", mark: .failed)).pastVerb == "Edited")
+}
+
+@Test func theNewestWordsOfALongMessageShow() {
+    let text = String(repeating: "word ", count: 60) + "end"
+    let tail = Formatting.tail(text, limit: 20)
+    #expect(tail.hasPrefix("…"))
+    #expect(tail.hasSuffix("end"))
+    #expect(tail.count <= 21)
+    #expect(Formatting.tail("short") == "short")
+    #expect(Formatting.duration(6_120) == "1h 42m")
+    #expect(Formatting.duration(2_520) == "42m")
+}
+
+@Test func lastWordsDrawTheirMarkdownAndFollowNoLink() {
+    let text = Formatting.inlineMarkdown("`formatDate` in **src/format.ts**, see [the PR](https://example.com/1)")
+    #expect(String(text.characters) == "formatDate in src/format.ts, see the PR")
+    #expect(text.runs.allSatisfy { $0.link == nil })
+    #expect(text.runs.contains { $0.inlinePresentationIntent == .code })
+}
+
+@Test func permissionsReadAsVerbs() {
+    #expect(Formatting.permissionVerb("bash") == "run")
+    #expect(Formatting.permissionVerb("edit") == "edit")
+    #expect(Formatting.permissionVerb("external_directory") == "external directory")
 }
 
 @Test func shellBlocksReadAsTheCommandInside() {

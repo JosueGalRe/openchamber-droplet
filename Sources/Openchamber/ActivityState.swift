@@ -20,6 +20,8 @@ struct SessionInfo: Equatable, Sendable {
     var modelID: String? = nil
     /// The agent profile the session runs as: `build`, `plan`, or one of your own.
     var agent: String? = nil
+    /// How hard the model reasons: `xhigh`, `medium`, `default`, …
+    var variant: String? = nil
 
     /// The folder name, which is how OpenChamber's sidebar names a project.
     var project: String { (directory as NSString).lastPathComponent }
@@ -56,6 +58,13 @@ struct SessionActivity: Equatable, Sendable {
     var lastText: String?
     /// Tool calls in this turn, all of them; `calls` keeps only the last few.
     var steps = 0
+    /// The block of text the agent is writing now, as far as it got.
+    var liveText: String?
+    /// Tokens the context held after the latest step, until a compaction changes it.
+    var contextTokens: Int?
+    var compacting = false
+    /// The user message the turn answers, which the turn's diff is measured from.
+    var promptID: String?
 
     var isBusy: Bool { busySince != nil }
     /// The call the session is in, if it is in one.
@@ -64,7 +73,9 @@ struct SessionActivity: Equatable, Sendable {
     /// What the session is doing, in words, while it is busy.
     var narration: Narration? {
         if let running = calls.last(where: { $0.mark == .running }) { return Narration(call: running) }
-        return isBusy ? .thinking : nil
+        guard isBusy else { return nil }
+        if compacting { return .compacting }
+        return liveText == nil ? .thinking : .writing
     }
 }
 
@@ -74,9 +85,19 @@ struct Narration: Equatable, Sendable {
     let object: String?
 
     static let thinking = Narration(verb: "Thinking…", object: nil)
+    static let writing = Narration(verb: "Writing…", object: nil)
+    static let compacting = Narration(verb: "Compacting context…", object: nil)
 
     /// "Editing Views.swift", for a line with no room for weights.
     var sentence: String { [verb, object].compactMap { $0 }.joined(separator: " ") }
+
+    /// The verb once the call is over: "Read", "Ran", "Edited".
+    var pastVerb: String {
+        let past = ["Reading": "Read", "Editing": "Edited", "Writing": "Wrote", "Running": "Ran", "Searching": "Searched",
+                    "Listing": "Listed", "Fetching": "Fetched", "Searching the web": "Searched the web",
+                    "Delegating": "Delegated", "Planning": "Planned", "Using": "Used"]
+        return past[verb] ?? verb
+    }
 
     init(verb: String, object: String?) {
         self.verb = verb
@@ -148,6 +169,25 @@ struct PendingForm: Equatable, Identifiable, Sendable {
     var directory: String?
     /// Questions after the first, answered in the same form.
     var moreQuestions = 0
+    /// Set when the whole form is one pick from a list, which a card can answer.
+    var choice: FormChoice? = nil
+}
+
+/// A form that is a single pick from a list of options.
+struct FormChoice: Equatable, Sendable {
+    struct Option: Equatable, Sendable {
+        let value: String
+        /// Without the agent's "(recommended)" marker.
+        let label: String
+        let recommended: Bool
+    }
+
+    /// The field the answer goes under.
+    let key: String
+    /// The recommended option first.
+    let options: [Option]
+    /// Whether the form also takes an answer of the user's own.
+    let custom: Bool
 }
 
 enum ExecutionOutcome: String, Equatable, Sendable {
@@ -167,6 +207,15 @@ enum ActivityEvent: Equatable, Sendable {
     case toolCalled(sessionID: String, callID: String, name: String?, target: String?)
     case toolFinished(sessionID: String, callID: String, succeeded: Bool)
     case textEnded(sessionID: String, text: String)
+    /// A new block of text begins; the deltas that follow are its words.
+    case textStarted(sessionID: String)
+    case textStreamed(sessionID: String, delta: String)
+    /// A step ended, with what the context holds after it.
+    case stepEnded(sessionID: String, contextTokens: Int?)
+    case compaction(sessionID: String, running: Bool)
+    /// The user's message reached the session: the turn it starts is measured from it.
+    case promptDelivered(sessionID: String, messageID: String)
+    case branchChanged(directory: String, branch: String?)
     /// `session.created`, `session.renamed`, `session.agent.selected` and
     /// `session.model.selected`: whatever changed, nil for what did not.
     case sessionChanged(SessionChange)
@@ -188,6 +237,7 @@ struct SessionChange: Equatable, Sendable {
     var providerID: String?
     var modelID: String?
     var agent: String?
+    var variant: String? = nil
 }
 
 /// The one thing the notch says, derived from the whole state.
@@ -206,6 +256,8 @@ struct ActivityState: Equatable, Sendable {
     /// Oldest first: "approve the oldest" acts on `permissions.first`.
     var permissions: [PendingPermission] = []
     var forms: [PendingForm] = []
+    /// The git branch each project is on, by directory.
+    var branches: [String: String] = [:]
 
     static let recentCallLimit = 12
     /// OpenChamber's own busy-to-idle cooldown (`SESSION_COOLDOWN_DURATION_MS`).
@@ -224,6 +276,7 @@ struct ActivityState: Equatable, Sendable {
             result.activity.merge(state.activity) { current, _ in current }
             result.permissions += state.permissions
             result.forms += state.forms
+            result.branches.merge(state.branches) { current, _ in current }
         }
         return result
     }
@@ -293,6 +346,8 @@ struct ActivityState: Equatable, Sendable {
             session.finishedAt = nil
             // A new turn: last turn's words no longer describe what it is doing.
             session.lastText = nil
+            session.liveText = nil
+            session.compacting = false
             session.steps = 0
             activity[id] = session
 
@@ -300,6 +355,8 @@ struct ActivityState: Equatable, Sendable {
             var session = activity[id, default: SessionActivity()]
             session.busySince = nil
             session.retry = nil
+            session.liveText = nil
+            session.compacting = false
             for index in session.calls.indices where session.calls[index].mark == .running {
                 session.calls[index].mark = outcome == .succeeded ? .succeeded : .failed
             }
@@ -336,7 +393,11 @@ struct ActivityState: Equatable, Sendable {
             if let directory = change.directory { info.directory = directory }
             if let parentID = change.parentID { info.parentID = parentID }
             if let providerID = change.providerID { info.providerID = providerID }
-            if let modelID = change.modelID { info.modelID = modelID }
+            if let modelID = change.modelID {
+                info.modelID = modelID
+                // A new model brings its own variant, or none.
+                info.variant = change.variant
+            }
             if let agent = change.agent { info.agent = agent }
             // Only a session we know, or one being created, gets a record:
             // a rename of a session we never listed waits for the lookup.
@@ -344,6 +405,27 @@ struct ActivityState: Equatable, Sendable {
 
         case let .textEnded(id, text):
             activity[id, default: SessionActivity()].lastText = text
+            activity[id]?.liveText = nil
+
+        case let .textStarted(id):
+            activity[id, default: SessionActivity()].liveText = ""
+
+        case let .textStreamed(id, delta):
+            activity[id, default: SessionActivity()].liveText = (activity[id]?.liveText ?? "") + delta
+
+        case let .stepEnded(id, tokens):
+            if let tokens { activity[id, default: SessionActivity()].contextTokens = tokens }
+
+        case let .compaction(id, running):
+            activity[id, default: SessionActivity()].compacting = running
+            // The window holds the summary now; the next step says how much that is.
+            if !running { activity[id]?.contextTokens = nil }
+
+        case let .promptDelivered(id, messageID):
+            activity[id, default: SessionActivity()].promptID = messageID
+
+        case let .branchChanged(directory, branch):
+            branches[directory] = branch
 
         case let .permissionAsked(permission):
             guard !permissions.contains(where: { $0.id == permission.id }) else { return }
@@ -450,12 +532,27 @@ enum ActivityWire {
                 parentID: data["parentID"] as? String,
                 providerID: model?["providerID"] as? String,
                 modelID: model?["id"] as? String,
-                agent: data["agent"] as? String
+                agent: data["agent"] as? String,
+                variant: model?["variant"] as? String
             ))
         case "session.text.ended":
             guard let sessionID, let text = (data["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !text.isEmpty else { return nil }
             return .textEnded(sessionID: sessionID, text: text)
+        case "session.text.started":
+            return sessionID.map(ActivityEvent.textStarted)
+        case "session.text.delta":
+            guard let sessionID, let delta = data["delta"] as? String else { return nil }
+            return .textStreamed(sessionID: sessionID, delta: delta)
+        case "session.step.ended":
+            return sessionID.map { .stepEnded(sessionID: $0, contextTokens: contextTokens(of: data["tokens"])) }
+        case "session.compaction.started", "session.compaction.ended", "session.compaction.failed":
+            return sessionID.map { .compaction(sessionID: $0, running: type == "session.compaction.started") }
+        case "session.inbox.delivered":
+            guard let sessionID, let messageID = data["inboxID"] as? String else { return nil }
+            return .promptDelivered(sessionID: sessionID, messageID: messageID)
+        case "vcs.branch.updated":
+            return directory.map { .branchChanged(directory: $0, branch: data["branch"] as? String) }
         case "session.tool.success", "session.tool.failed":
             guard let sessionID, let callID = data["id"] as? String else { return nil }
             return .toolFinished(sessionID: sessionID, callID: callID, succeeded: type == "session.tool.success")
@@ -511,8 +608,22 @@ enum ActivityWire {
             parentID: record["parentID"] as? String,
             providerID: model?["providerID"] as? String,
             modelID: model?["id"] as? String,
-            agent: record["agent"] as? String
+            agent: record["agent"] as? String,
+            variant: model?["variant"] as? String
         )
+    }
+
+    /// What the context holds after a step: the server's `total` for the last
+    /// round trip when it sends one, else the sum of the parts, which is how
+    /// OpenChamber reads it.
+    static func contextTokens(of value: Any?) -> Int? {
+        guard let tokens = value as? [String: Any] else { return nil }
+        if let total = (tokens["total"] as? NSNumber)?.intValue, total > 0 { return total }
+        let cache = tokens["cache"] as? [String: Any] ?? [:]
+        let sum = [tokens["input"], tokens["output"], tokens["reasoning"], cache["read"], cache["write"]]
+            .compactMap { ($0 as? NSNumber)?.intValue }
+            .reduce(0, +)
+        return sum > 0 ? sum : nil
     }
 
     static func permission(from data: [String: Any], directory: String?) -> PendingPermission? {
@@ -536,7 +647,27 @@ enum ActivityWire {
             .compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
         return PendingForm(id: id, sessionID: sessionID, title: ask ?? "A question", directory: directory,
-                           moreQuestions: max(0, fields.count - 1))
+                           moreQuestions: max(0, fields.count - 1), choice: choice(in: fields))
+    }
+
+    /// The form's one pick, when it is one text field with options and nothing else.
+    static func choice(in fields: [[String: Any]]) -> FormChoice? {
+        guard fields.count == 1, let field = fields.first, field["type"] as? String == "string",
+              let key = field["key"] as? String else { return nil }
+        // OpenChamber's own marker: the agent writes it into the label.
+        let marker = /\s*\(recommended\)\s*/.ignoresCase()
+        let options = (field["options"] as? [[String: Any]] ?? []).compactMap { option -> FormChoice.Option? in
+            guard let value = option["value"] as? String else { return nil }
+            let label = option["label"] as? String ?? value
+            return FormChoice.Option(
+                value: value,
+                label: label.replacing(marker, with: " ").trimmingCharacters(in: .whitespaces),
+                recommended: label.contains(marker)
+            )
+        }
+        guard !options.isEmpty else { return nil }
+        return FormChoice(key: key, options: options.filter(\.recommended) + options.filter { !$0.recommended },
+                          custom: field["custom"] as? Bool ?? false)
     }
 
     /// The part of a tool's input worth a glance: a file name, a command, a host.

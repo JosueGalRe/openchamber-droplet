@@ -42,6 +42,24 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         var usageFetchedAt: Date?
         /// How the current connection reaches the server, for settings.
         var route: String?
+        /// The catalog's models, keyed `provider/model`.
+        var models: [String: CatalogModel] = [:]
+    }
+
+    /// What the agents did today, for the widget when nothing is running.
+    struct TodayStats: Codable, Equatable {
+        /// `2026-10-23`, in this Mac's calendar.
+        var day: String
+        var turns = 0
+        var seconds: TimeInterval = 0
+        /// Requests and questions settled, here or in OpenChamber.
+        var answered = 0
+        var lines = TurnDiff()
+
+        static func key(for date: Date) -> String {
+            let day = Calendar.current.dateComponents([.year, .month, .day], from: date)
+            return String(format: "%04d-%02d-%02d", day.year ?? 0, day.month ?? 0, day.day ?? 0)
+        }
     }
 
     /// The widget's two pages, switched from its header like Agents' Progress and Usage.
@@ -60,6 +78,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     @Published private(set) var phase: ActivityPhase = .idle
     @Published private(set) var seat: DropletLiveActivitySeat = .none(.idle)
     @Published private(set) var tab: WidgetTab = .sessions
+    @Published private(set) var today = TodayStats(day: TodayStats.key(for: Date()))
+    /// What each session's last finished turn changed, once asked.
+    @Published private(set) var turnDiffs: [String: TurnDiff] = [:]
+    /// The session the full-shelf view shows.
+    @Published private(set) var focusedSessionID: String?
 
     private(set) var host: DropletHost?
     private var clients: [String: OpenChamberClient] = [:]
@@ -72,6 +95,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// Turns that ended while the last Done card was up, so it can say "2 done".
     private var recentTurnEnds: [Date] = []
     private var usageWarnings: Set<String> = []
+    /// Words streamed since the last flush, per server and session: a delta
+    /// comes per token, and the notch redraws four times a second at most.
+    private var pendingText: [String: [String: String]] = [:]
+    private var textFlush: Task<Void, Never>?
+    private var focusPresentation: ExpandedSurfacePresentation?
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
     private let lockScreenSubject = CurrentValueSubject<LockScreenStatusEntry?, Never>(nil)
 
@@ -80,6 +108,9 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     public func activate(host: DropletHost) throws {
         self.host = host
         tab = host.preferences.value(forKey: "tab", default: WidgetTab.sessions)
+        if let stored = host.preferences.value(forKey: "today", as: TodayStats.self), stored.day == TodayStats.key(for: Date()) {
+            today = stored
+        }
         if host.environment.isHarness {
             loadSample()
         } else {
@@ -107,6 +138,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         for id in announcedForms { host?.hud.dismiss(id: formHUDID(id)) }
         host?.hud.dismiss(id: Self.doneHUDID)
         host?.hud.dismiss(id: Self.failedHUDID)
+        if focusPresentation != nil { host?.notchSurface.dismissExpandedSurface(Self.focusSurfaceID) }
         activitySubject.send(nil)
         lockScreenSubject.send(nil)
         host = nil
@@ -160,6 +192,9 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     private func stopFeeds() {
         feeds.values.forEach { $0.cancel() }
         usageRefreshes.values.forEach { $0.cancel() }
+        textFlush?.cancel()
+        textFlush = nil
+        pendingText = [:]
         feeds = [:]
         usageRefreshes = [:]
         clients = [:]
@@ -216,7 +251,16 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 serverStates[server.id]?.route = route.description
                 setConnection(.connecting, for: server.id)
                 apply(try await client.seed(), from: server.id)
-                apply(.sessionsListed(try await client.recentSessions()), from: server.id)
+                let sessions = try await client.recentSessions()
+                apply(.sessionsListed(sessions), from: server.id)
+                // OpenCode reads its catalog through a project; the most recent
+                // session's is one it has open. Without it, sessions show model ids.
+                if let directory = sessions.first?.directory, !directory.isEmpty {
+                    let id = server.id
+                    Task { [weak self] in
+                        if let models = try? await client.models(directory: directory) { self?.serverStates[id]?.models = models }
+                    }
+                }
                 let stream = try await client.events(after: lastEventID)
                 setConnection(.live, for: server.id)
                 backoff = 2
@@ -304,11 +348,36 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     private func apply(_ event: ActivityEvent, from serverID: String) {
         guard var server = serverStates[serverID] else { return }
+        switch event {
+        case let .textStreamed(id, delta):
+            pendingText[serverID, default: [:]][id, default: ""] += delta
+            scheduleTextFlush()
+            return
+        case let .textStarted(id), let .textEnded(id, _), let .executionEnded(id, _, _, _):
+            // The block these words belonged to is over; the event says the rest.
+            pendingText[serverID]?[id] = nil
+        case let .executionStarted(id, _):
+            // Last turn's diff does not describe this one.
+            if turnDiffs[id] != nil { turnDiffs[id] = nil }
+        default:
+            break
+        }
         let wasBusy = !server.activity.busySessionIDs.isEmpty
         var ended: (() -> Void)?
         if case let .executionEnded(id, outcome, at, error) = event {
             let turn = server.activity.activity[id]?.busySince.map { at.timeIntervalSince($0) }
+            if outcome != .interrupted, server.activity.sessions[id]?.parentID == nil, server.activity.sessions[id] != nil {
+                countToday { $0.turns += 1; $0.seconds += turn ?? 0 }
+            }
             ended = { [weak self] in self?.announceEnd(of: id, outcome: outcome, error: error, turn: turn) }
+        }
+        switch event {
+        case let .permissionSettled(sessionID, requestID) where server.activity.permissions.contains { $0.id == requestID && $0.sessionID == sessionID }:
+            countToday { $0.answered += 1 }
+        case let .formSettled(sessionID, formID) where server.activity.forms.contains { $0.id == formID && $0.sessionID == sessionID }:
+            countToday { $0.answered += 1 }
+        default:
+            break
         }
         server.activity.apply(event)
         serverStates[serverID] = server
@@ -331,6 +400,30 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         }
     }
 
+    private func scheduleTextFlush() {
+        guard textFlush == nil else { return }
+        textFlush = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard let self, !Task.isCancelled else { return }
+            textFlush = nil
+            let pending = pendingText
+            pendingText = [:]
+            for (serverID, sessions) in pending {
+                for (id, delta) in sessions { serverStates[serverID]?.activity.apply(.textStreamed(sessionID: id, delta: delta)) }
+            }
+            publish()
+        }
+    }
+
+    /// Adds to today's numbers, starting the day over when the date has moved on.
+    private func countToday(_ change: (inout TodayStats) -> Void) {
+        let day = TodayStats.key(for: Date())
+        var stats = today.day == day ? today : TodayStats(day: day)
+        change(&stats)
+        today = stats
+        host?.preferences.setValue(stats, forKey: "today")
+    }
+
     /// The server a session belongs to, for routing an action back to it.
     private func serverID(forSession id: String) -> String? {
         serverStates.first { _, server in
@@ -339,6 +432,22 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 || server.activity.permissions.contains { $0.sessionID == id }
                 || server.activity.forms.contains { $0.sessionID == id }
         }?.key
+    }
+
+    /// A session's model as the catalog of the server it runs on lists it.
+    private func catalogModel(forSession id: String) -> CatalogModel? {
+        guard let serverID = serverID(forSession: id), let session = state.sessions[id],
+              let provider = session.providerID, let model = session.modelID else { return nil }
+        return serverStates[serverID]?.models["\(provider)/\(model)"]
+    }
+
+    /// The catalog's name for a session's model, `Opus 5.5`.
+    func modelName(forSession id: String) -> String? { catalogModel(forSession: id)?.name }
+
+    /// How full the session's context window is, 0 through 1, once a step has said.
+    func contextShare(forSession id: String) -> Double? {
+        guard let tokens = state.activity[id]?.contextTokens else { return nil }
+        return catalogModel(forSession: id)?.contextShare(of: tokens)
     }
 
     /// The server's name, when there is more than one server to tell apart.
@@ -369,6 +478,45 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         guard let serverID = serverID(forSession: sessionID), let client = clients[serverID] else { return }
         let directory = state.sessions[sessionID]?.directory
         Task { try? await client.interrupt(sessionID: sessionID, directory: directory) }
+    }
+
+    /// Answers a one-pick form with one of its options.
+    func answer(_ form: PendingForm, with option: FormChoice.Option) {
+        guard let choice = form.choice, let serverID = serverID(forSession: form.sessionID), let client = clients[serverID] else { return }
+        Task {
+            do {
+                try await client.answer(form, key: choice.key, value: option.value)
+                apply(.formSettled(sessionID: form.sessionID, formID: form.id), from: serverID)
+                host?.feedback.play(.success)
+            } catch {
+                host?.log.error("form reply failed: \(error.localizedDescription)")
+                host?.feedback.play(.failure)
+            }
+        }
+    }
+
+    static let focusSurfaceID: ExpandedSurfaceID = "session"
+
+    /// Takes the whole shelf over with one session: its steps, its words, Stop.
+    func focus(_ id: String) {
+        focusedSessionID = id
+        refreshBranch(forSession: id)
+        focusPresentation = host?.notchSurface.presentExpandedSurface(ExpandedSurfacePresentationRequest(surfaceID: Self.focusSurfaceID))
+    }
+
+    func closeFocus() {
+        host?.notchSurface.dismissExpandedSurface(Self.focusSurfaceID)
+    }
+
+    /// The project's branch, asked once per directory; `vcs.branch.updated` keeps it current.
+    private func refreshBranch(forSession id: String) {
+        guard let directory = state.sessions[id]?.directory, !directory.isEmpty, state.branches[directory] == nil,
+              let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
+        Task {
+            if let branch = try? await client.branch(directory: directory) {
+                apply(.branchChanged(directory: directory, branch: branch), from: serverID)
+            }
+        }
     }
 
     /// Opens the session in OpenChamber Desktop, on the instance that owns it:
@@ -494,7 +642,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             if tab != .sessions { tab = .sessions }
             let session = state.sessions[permission.sessionID]
             let command = permission.resources.joined(separator: "\n")
-            let verb = permission.action == "bash" || permission.action == "shell" ? "run" : permission.action
+            let verb = Formatting.permissionVerb(permission.action)
             let meta = [session?.project, serverLabel(forSession: permission.sessionID)].compactMap { $0 }.joined(separator: " · ")
             let request = DropletHUDRequest(
                 id: hudID(permission.id),
@@ -536,13 +684,14 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// A subagent's turn is part of its parent's, and a session we have no
     /// record of yet could be one, so neither says anything.
     private func announceEnd(of id: String, outcome: ExecutionOutcome, error: String?, turn: TimeInterval?) {
-        guard outcome != .interrupted, let host, !openChamberIsInFront,
-              let session = state.sessions[id], session.parentID == nil else { return }
+        guard outcome != .interrupted, let host, let session = state.sessions[id], session.parentID == nil else { return }
         let place = [session.project, serverLabel(forSession: id)].compactMap { $0 }
         let open: @MainActor () -> Void = { [weak self] in self?.openSession(id) }
+        // Whether a card may show; what the turn changed is counted either way.
+        let showsCard = !openChamberIsInFront
 
         if outcome == .failed {
-            guard showsFailureCards else { return }
+            guard showsCard, showsFailureCards else { return }
             _ = host.hud.present(DropletHUDRequest(
                 id: Self.failedHUDID, duration: 10, priority: .high,
                 accessibilityLabel: "\(session.title) failed", isExpanded: true, expandedContentHeight: 72
@@ -558,24 +707,52 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             return
         }
 
-        guard showsDoneCards else { return }
+        let carded = showsCard && showsDoneCards
         let now = Date()
-        recentTurnEnds = recentTurnEnds.filter { now.timeIntervalSince($0) < 5 } + [now]
+        if carded { recentTurnEnds = recentTurnEnds.filter { now.timeIntervalSince($0) < 5 } + [now] }
         let others = recentTurnEnds.count - 1
         let last = state.activity[id]?.lastText
-        _ = host.hud.present(DropletHUDRequest(
-            id: Self.doneHUDID, duration: 5,
-            accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: last == nil ? 36 : 72
-        ) {
-            NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: others > 0 ? "\(others + 1) done" : "Done", tint: .green)
-        } expanded: {
-            NoticeCard(
-                provider: session.providerID ?? "", symbol: "checkmark", tint: .green, title: session.title,
-                status: ["Done", turn.map { "in \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " "),
-                meta: ((others > 0 ? ["+\(others) more"] : []) + place).joined(separator: " · "),
-                detail: last, style: .text, onOpen: open
-            )
-        })
+        let prompt = state.activity[id]?.promptID
+        let client = serverID(forSession: id).flatMap { clients[$0] }
+        Task { [weak self] in
+            // What the turn changed rides on the card when the server says in time;
+            // a slow answer does not hold the card back.
+            var diff: TurnDiff?
+            if let client, let prompt {
+                diff = await Self.within(seconds: 1.5) { try? await client.turnDiff(sessionID: id, from: prompt, directory: session.directory) }
+            }
+            guard let self, let host = self.host else { return }
+            if let diff, !diff.isEmpty {
+                turnDiffs[id] = diff
+                countToday { $0.lines.additions += diff.additions; $0.lines.deletions += diff.deletions; $0.lines.files += diff.files }
+            }
+            guard carded else { return }
+            _ = host.hud.present(DropletHUDRequest(
+                id: Self.doneHUDID, duration: 5,
+                accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: last == nil ? 36 : 72
+            ) {
+                NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: others > 0 ? "\(others + 1) done" : "Done", tint: .green)
+            } expanded: {
+                NoticeCard(
+                    provider: session.providerID ?? "", symbol: "checkmark", tint: .green, title: session.title,
+                    status: ["Done", turn.map { "in \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " "),
+                    meta: ((others > 0 ? ["+\(others) more"] : []) + place).joined(separator: " · "),
+                    diff: diff?.isEmpty == false ? diff : nil,
+                    detail: last, style: .text, onOpen: open
+                )
+            })
+        }
+    }
+
+    /// The work's answer, or nil when it takes longer than `seconds`.
+    private nonisolated static func within<T: Sendable>(seconds: Double, _ work: @escaping @Sendable () async -> T?) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await work() }
+            group.addTask { try? await Task.sleep(for: .seconds(seconds)); return nil }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
     }
 
     /// A card for each new question, up until it is answered. Forms can hold
@@ -602,11 +779,31 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 NoticeCard(
                     provider: session?.providerID ?? "", symbol: "questionmark", tint: .orange,
                     title: session?.title ?? "A session", status: "Asks", meta: meta, detail: form.title, style: .question,
-                    actions: [NoticeAction(title: "Answer in OpenChamber", role: .accent) { self?.openSession(form.sessionID) }],
+                    actions: Self.answers(to: form,
+                                          pick: { self?.answer(form, with: $0) },
+                                          openChamber: { self?.openSession(form.sessionID) }),
                     onOpen: { self?.openSession(form.sessionID) }
                 )
             })
         }
+    }
+
+    /// A one-pick form's options as buttons, up to three, the recommended one
+    /// in accent; more options or an answer of one's own go to OpenChamber.
+    static func answers(
+        to form: PendingForm,
+        pick: @escaping @MainActor (FormChoice.Option) -> Void,
+        openChamber: @escaping @MainActor () -> Void
+    ) -> [NoticeAction] {
+        guard let choice = form.choice else { return [NoticeAction(title: "Answer in OpenChamber", role: .accent, run: openChamber)] }
+        let shown = choice.options.prefix(3)
+        var actions = shown.map { option in
+            NoticeAction(title: option.label, role: option.recommended ? .accent : .quiet) { pick(option) }
+        }
+        if choice.custom || choice.options.count > shown.count {
+            actions.append(NoticeAction(title: "Other…", role: .quiet, run: openChamber))
+        }
+        return actions
     }
 
     // MARK: Usage
@@ -688,6 +885,23 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         }
     }
 
+    /// The agent whose mascot the notch shows: the session that waits on you,
+    /// else the one that has run longest.
+    var leadProvider: String? {
+        let id = state.permissions.first?.sessionID ?? state.forms.first?.sessionID ?? state.busySessionIDs.first
+        return id.flatMap { state.sessions[$0]?.providerID }
+    }
+
+    /// A dot per running session for the notch's wing, `true` for one that
+    /// waits on you. Nil for one session, which needs no dot, and past four,
+    /// which the wing has no room for.
+    var sessionDots: [Bool]? {
+        let busy = state.busySessionIDs
+        guard (2...4).contains(busy.count) else { return nil }
+        let waiting = Set(state.permissions.map(\.sessionID) + state.forms.map(\.sessionID))
+        return busy.map(waiting.contains)
+    }
+
     var glyphMotion: ChamberGlyphMotion {
         switch phase {
         case .idle: return .still
@@ -753,6 +967,29 @@ extension OpenchamberDroplet: ShelfWidgetProviding {
     }
 }
 
+// MARK: - Expanded surface
+
+extension OpenchamberDroplet: ExpandedSurfaceProviding {
+    public var expandedSurfaces: [ExpandedSurfaceDescriptor] {
+        // Read, not pointed at: the shelf must not close while the pointer is elsewhere.
+        [ExpandedSurfaceDescriptor(id: Self.focusSurfaceID, title: "OpenChamber session", systemImage: "cube", suppresses: [.shelfWidgets, .autoCollapse])]
+    }
+
+    public func makeExpandedSurfaceView(_ id: ExpandedSurfaceID, context: ExpandedSurfaceContext) -> AnyView {
+        AnyView(SessionFocus(droplet: self))
+    }
+
+    public func expandedSurfaceSize(_ id: ExpandedSurfaceID, fitting proposal: ExpandedSurfaceSizeProposal) -> CGSize? {
+        CGSize(width: min(560, proposal.maximumSize.width), height: min(260, proposal.maximumSize.height))
+    }
+
+    public func expandedSurfaceDidDismiss(_ id: ExpandedSurfaceID, presentation: ExpandedSurfacePresentation, reason: ExpandedSurfaceDismissalReason) {
+        guard presentation.id == focusPresentation?.id else { return }
+        focusPresentation = nil
+        focusedSessionID = nil
+    }
+}
+
 // MARK: - HUD, lock screen, menu bar
 
 extension OpenchamberDroplet: HUDPresenting {}
@@ -797,17 +1034,21 @@ private extension OpenchamberDroplet {
 
         var local = ServerState(connection: .live)
         local.activity.apply(.sessionsListed([
-            SessionInfo(id: "s1", title: "Fix notification title cache", directory: "/Users/me/projects/openchamber", parentID: nil, providerID: "anthropic", modelID: "claude-opus-5-5"),
+            SessionInfo(id: "s1", title: "Fix notification title cache", directory: "/Users/me/projects/openchamber", parentID: nil, providerID: "claude-code", modelID: "claude-opus-5-5[1m]", agent: "build", variant: "xhigh"),
             SessionInfo(id: "s2", title: "Design the droplet", directory: "/Users/me/projects/openchamber-droplet", parentID: nil, providerID: "anthropic"),
         ]))
         local.activity.apply(.executionStarted(sessionID: "s1", at: now.addingTimeInterval(-252)))
-        for (index, mark) in [true, true, false, true, true].enumerated() {
-            local.activity.apply(.toolStarted(sessionID: "s1", callID: "c\(index)", name: "read"))
+        for (index, (name, target, mark)) in [("read", "title-cache.js", true), ("grep", "notificationTitle", true), ("bash", "pnpm test", false),
+                                               ("read", "session-runtime.js", true), ("bash", "pnpm test", true)].enumerated() {
+            local.activity.apply(.toolStarted(sessionID: "s1", callID: "c\(index)", name: name))
+            local.activity.apply(.toolCalled(sessionID: "s1", callID: "c\(index)", name: nil, target: target))
             local.activity.apply(.toolFinished(sessionID: "s1", callID: "c\(index)", succeeded: mark))
         }
         local.activity.apply(.toolStarted(sessionID: "s1", callID: "c9", name: "edit"))
         local.activity.apply(.toolCalled(sessionID: "s1", callID: "c9", name: nil, target: "session-runtime.js"))
         local.activity.apply(.textEnded(sessionID: "s1", text: "23/23 tests pass. Next: build, validate and the shots of the Sessions page."))
+        local.activity.apply(.stepEnded(sessionID: "s1", contextTokens: 412_000))
+        local.activity.apply(.branchChanged(directory: "/Users/me/projects/openchamber", branch: "fix/title-cache"))
         local.activity.apply(.executionStarted(sessionID: "s2", at: now.addingTimeInterval(-48)))
         local.activity.apply(.permissionAsked(PendingPermission(
             id: "p1", sessionID: "s2", action: "bash",
@@ -817,13 +1058,17 @@ private extension OpenchamberDroplet {
         local.usage = [
             ProviderQuota(id: "claude", provider: "claude", name: "Claude", plan: "Max (5x)", windows: [
                 QuotaWindow(name: "5h", usedPercent: 3, windowSeconds: 18_000, resetAt: now.addingTimeInterval(15_660)),
-                QuotaWindow(name: "7d", usedPercent: 7, windowSeconds: 604_800, resetAt: now.addingTimeInterval(518_400)),
+                QuotaWindow(name: "7d", usedPercent: 41, windowSeconds: 604_800, resetAt: now.addingTimeInterval(518_400)),
                 QuotaWindow(name: "7d", model: "Fable", usedPercent: 0, windowSeconds: 604_800, resetAt: now.addingTimeInterval(518_400)),
             ]),
             ProviderQuota(id: "opencode-go", provider: "opencode-go", name: "OpenCode Go", plan: nil, windows: [
                 QuotaWindow(name: "monthly", usedPercent: 3, windowSeconds: 2_592_000, resetAt: now.addingTimeInterval(1_900_000)),
             ]),
+            ProviderQuota(id: "github-copilot", provider: "github-copilot", name: "GitHub Copilot", plan: nil, windows: [
+                QuotaWindow(name: "premium_interactions", usedPercent: nil, windowSeconds: nil, resetAt: nil, valueLabel: "Unlimited"),
+            ]),
         ]
+        local.models = ["claude-code/claude-opus-5-5[1m]": CatalogModel(name: "Opus 5.5", context: 1_000_000, output: 128_000)]
 
         var work = ServerState(connection: .live)
         work.activity.apply(.sessionsListed([SessionInfo(id: "w1", title: "API migration", directory: "/home/me/work/api", parentID: nil)]))
@@ -834,6 +1079,9 @@ private extension OpenchamberDroplet {
             ]),
         ]
         serverStates = [mac.id: local, remote.id: work]
+        turnDiffs = ["s1": TurnDiff(files: 3, additions: 42, deletions: 7)]
+        today = TodayStats(day: TodayStats.key(for: now), turns: 7, seconds: 6_120, answered: 3, lines: TurnDiff(files: 9, additions: 318, deletions: 96))
+        focusedSessionID = "s1"
         publish(now: now)
     }
 }

@@ -93,6 +93,57 @@ private var relay: [String: Any] { [
     #expect(OpenChamberClient.quota(from: ["ok": false], providerID: "claude") == nil)
 }
 
+@Test func catalogModelsAreKeyedTheWayASessionRecordsItsModel() {
+    let body: [String: Any] = ["location": [:], "data": [
+        ["providerID": "claude-code", "id": "claude-opus-5-5[1m]", "modelID": "claude-opus-5-5[1m]", "name": "Opus 5.5",
+         "limit": ["context": 1_000_000, "output": 128_000]],
+        ["providerID": "openai", "id": "gpt-6-luna-fast", "modelID": "gpt-6-luna", "name": "GPT-6 Luna Fast"],
+        ["providerID": "openai", "id": "unnamed", "name": ""],
+    ]]
+    #expect(OpenChamberClient.models(from: body) == [
+        "claude-code/claude-opus-5-5[1m]": CatalogModel(name: "Opus 5.5", context: 1_000_000, output: 128_000),
+        "openai/gpt-6-luna-fast": CatalogModel(name: "GPT-6 Luna Fast"),
+    ])
+    #expect(OpenChamberClient.models(from: nil).isEmpty)
+}
+
+@Test func contextFillsAgainstTheWindowLessTheOutputItKeeps() {
+    let opus = CatalogModel(name: "Opus 5.5", context: 1_000_000, output: 128_000)
+    // Output room is capped at 32k, as in OpenChamber.
+    #expect(opus.contextShare(of: 484_000) == 0.5)
+    #expect(opus.contextShare(of: 2_000_000) == 1)
+    #expect(CatalogModel(name: "Small", context: 100_000).contextShare(of: 34_000) == 0.5)
+    #expect(CatalogModel(name: "Unknown").contextShare(of: 10) == nil)
+}
+
+@Test func aTurnsDiffSumsItsFiles() {
+    let diff = TurnDiff(files: [
+        ["file": "a.swift", "additions": 40, "deletions": 2, "status": "modified"],
+        ["file": "b.swift", "additions": 2, "deletions": 5, "status": "added"],
+    ])
+    #expect(diff == TurnDiff(files: 2, additions: 42, deletions: 7))
+    #expect(TurnDiff(files: []).isEmpty)
+}
+
+@Test func paceMarksAnEvenRateAndWhenTheWindowRunsDry() {
+    let now = Date(timeIntervalSince1970: 1_800_000_000)
+    let week: Double = 604_800
+    // A day into the week with 41% used: ahead of the 14% an even week would be.
+    let ahead = QuotaWindow(name: "7d", usedPercent: 41, windowSeconds: week, resetAt: now.addingTimeInterval(week - 86_400))
+    let pace = try! #require(ahead.pace(at: now))
+    #expect(abs(pace.expected - 100.0 / 7) < 0.01)
+    // 59% left at 41% a day lasts about 1.44 days more.
+    #expect(abs(pace.runsOut!.timeIntervalSince(now) - 59 * 86_400 / 41) < 1)
+
+    let behind = QuotaWindow(name: "7d", usedPercent: 5, windowSeconds: week, resetAt: now.addingTimeInterval(week - 86_400))
+    #expect(behind.pace(at: now)?.runsOut == nil)
+    // Too early in the window to say, and no reset to say it against.
+    #expect(QuotaWindow(name: "7d", usedPercent: 5, windowSeconds: week, resetAt: now.addingTimeInterval(week - 600)).pace(at: now) == nil)
+    #expect(QuotaWindow(name: "7d", usedPercent: 5, windowSeconds: week, resetAt: nil).pace(at: now) == nil)
+    #expect(Formatting.runsOut(now.addingTimeInterval(7_800), now: now) == "Runs out in 2h 10m")
+    #expect(Formatting.runsOut(now.addingTimeInterval(-5), now: now) == "Ran out")
+}
+
 @Test func resetsReadInHoursWithinADayAndAsADateAfter() {
     let now = Date(timeIntervalSince1970: 1_800_000_000)
     #expect(Formatting.resetText(now.addingTimeInterval(15_660), now: now) == "Resets in 4 hr 21 min")
