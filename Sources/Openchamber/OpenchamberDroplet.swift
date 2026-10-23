@@ -356,6 +356,12 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         // shortcut: Droppy's workspace.open refuses every scheme but http(s), mailto and file, and DroppyKit has no way to declare one, so this personal droplet opens the link itself; a Store build needs Droppy to allow openchamber://.
         let serverID = serverID(forSession: id)
         if let version = Self.installedDesktopVersion, DesktopLinks.namesHosts(version: version) {
+            // Desktop opens a session in the main window without raising it, so
+            // another host's window in front hides it and the click seems to do
+            // nothing. Raising the main window first fixes that, and a session of
+            // another host still ends up in that host's window, which Desktop raises.
+            // shortcut: drop the focus link once Desktop raises the window it opens a session in.
+            if let focus = DesktopLinks.focus { NSWorkspace.shared.open(focus) }
             if let url = DesktopLinks.session(id, host: serverID) { NSWorkspace.shared.open(url) }
             return
         }

@@ -141,6 +141,7 @@ private var relay: [String: Any] { [
     #expect(DesktopLinks.session("ses_1", host: "local") == URL(string: "openchamber://session/ses_1?host=local"))
     #expect(DesktopLinks.session("ses_1", host: nil) == URL(string: "openchamber://session/ses_1"))
     #expect(DesktopLinks.host("9bc34f85-c5be") == URL(string: "openchamber://host/9bc34f85-c5be"))
+    #expect(DesktopLinks.focus == URL(string: "openchamber://focus"))
     #expect(!DesktopLinks.namesHosts(version: "2.5.0"))
     #expect(!DesktopLinks.namesHosts(version: "2.4.12"))
     #expect(DesktopLinks.namesHosts(version: "2.5.1"))

@@ -75,6 +75,9 @@ enum DesktopLinks {
         return link.url
     }
 
+    /// `openchamber://focus`: brings Desktop's main window to the front.
+    static let focus = URL(string: "openchamber://focus")
+
     /// `openchamber://host/<id>`: switches Desktop's main window to that instance.
     static func host(_ id: String) -> URL? {
         var link = URLComponents()
