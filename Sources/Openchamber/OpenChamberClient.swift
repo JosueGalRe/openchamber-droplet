@@ -31,7 +31,7 @@ struct ChamberServer: Equatable, Sendable, Identifiable {
     let id: String
     let label: String
     /// Direct addresses, tried in order: Desktop's API address, then its UI one.
-    let directURLs: [URL]
+    var directURLs: [URL]
     /// The relay transport, for when no direct address answers.
     let relay: RelayConfig?
     let token: String
@@ -54,11 +54,6 @@ enum Route: Sendable {
     }
 }
 
-/// OpenChamber Desktop's own list of servers and tokens.
-///
-/// shortcut: reads Desktop's private settings file, which is fine for one
-/// person's Mac and would not pass Store review; a Store build would pair each
-/// server instead.
 /// The `openchamber://` links OpenChamber Desktop opens.
 enum DesktopLinks {
     static let bundleID = "dev.openchamber.desktop"
@@ -93,6 +88,11 @@ enum DesktopLinks {
     }
 }
 
+/// OpenChamber Desktop's own list of servers and tokens.
+///
+/// shortcut: reads Desktop's private settings file, which is fine for one
+/// person's Mac and would not pass Store review; a Store build would pair each
+/// server instead.
 enum DesktopServers {
     static var settingsFile: URL {
         FileManager.default.homeDirectoryForCurrentUser.appending(path: ".config/openchamber/settings.json")
@@ -101,6 +101,31 @@ enum DesktopServers {
     static func load(from file: URL = settingsFile) -> [ChamberServer] {
         guard let data = try? Data(contentsOf: file) else { return [] }
         return parse(data)
+    }
+
+    /// The TCP ports a process listens on, from `lsof`. Desktop writes its
+    /// server's port to the settings file only when it starts, so the file can
+    /// name a port nobody serves: a development build shares the file, writes
+    /// its own port and quits, and the running Desktop never writes again.
+    static func listeningPorts(of pid: Int32) -> [Int] {
+        let lsof = Process()
+        lsof.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
+        lsof.arguments = ["-nP", "-a", "-p", String(pid), "-iTCP", "-sTCP:LISTEN", "-Fn"]
+        let pipe = Pipe()
+        lsof.standardOutput = pipe
+        lsof.standardError = FileHandle.nullDevice
+        guard (try? lsof.run()) != nil else { return [] }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        lsof.waitUntilExit()
+        return listeningPorts(lsofOutput: String(decoding: output, as: UTF8.self))
+    }
+
+    /// `n*:57123`, `n127.0.0.1:62510`, `n[::1]:8080`: lsof's `-Fn` name lines.
+    static func listeningPorts(lsofOutput: String) -> [Int] {
+        lsofOutput.split(separator: "\n").compactMap { line in
+            guard line.hasPrefix("n"), let colon = line.lastIndex(of: ":") else { return nil }
+            return Int(line[line.index(after: colon)...])
+        }
     }
 
     /// The file also holds the UI password and other settings: only the

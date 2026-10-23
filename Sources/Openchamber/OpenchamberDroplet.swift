@@ -201,6 +201,11 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             var wait = backoff
             do {
                 guard let route = try await openRoute(to: server) else {
+                    // Desktop may have moved the server since the settings were read.
+                    if let moved = await movedServer(server) {
+                        server = moved
+                        continue
+                    }
                     setConnection(.offline, for: server.id)
                     try? await Task.sleep(for: .seconds(15))
                     continue
@@ -250,6 +255,29 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             try? await Task.sleep(for: .seconds(wait))
             backoff = min(backoff * 2, 60)
         }
+    }
+
+    /// Where an unreachable server went: the settings file's addresses when they
+    /// changed, else, for this Mac, the port the running Desktop serves on,
+    /// whatever the file says.
+    private func movedServer(_ server: ChamberServer) async -> ChamberServer? {
+        if let fresh = DesktopServers.load().first(where: { $0.id == server.id }), fresh != server {
+            return fresh
+        }
+        guard server.isLocal else { return nil }
+        let pids = NSRunningApplication.runningApplications(withBundleIdentifier: DesktopLinks.bundleID).map(\.processIdentifier)
+        for pid in pids {
+            let ports = await Task.detached { DesktopServers.listeningPorts(of: pid) }.value
+            for port in ports {
+                guard let url = URL(string: "http://127.0.0.1:\(port)"), !server.directURLs.contains(url),
+                      await OpenChamberClient.isReachable(url) else { continue }
+                host?.log.info("This Mac answers on port \(port), not where Desktop's settings say")
+                var moved = server
+                moved.directURLs = [url]
+                return moved
+            }
+        }
+        return nil
     }
 
     /// The first direct address that answers `/health`, else a relay tunnel

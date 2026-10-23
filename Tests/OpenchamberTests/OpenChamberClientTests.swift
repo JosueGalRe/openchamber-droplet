@@ -147,3 +147,9 @@ private var relay: [String: Any] { [
     #expect(DesktopLinks.namesHosts(version: "2.5.1"))
     #expect(DesktopLinks.namesHosts(version: "2.10.0"))
 }
+
+@Test func desktopsListeningPortsComeFromLsofNameLines() {
+    let output = "p39131\nf31\nn*:57123\nf40\nn127.0.0.1:62510\nf41\nn[::1]:8080\n"
+    #expect(DesktopServers.listeningPorts(lsofOutput: output) == [57123, 62510, 8080])
+    #expect(DesktopServers.listeningPorts(lsofOutput: "") == [])
+}
