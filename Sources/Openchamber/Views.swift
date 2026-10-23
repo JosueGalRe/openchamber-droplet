@@ -311,7 +311,7 @@ private struct SessionsPage: View {
 /// One session, given the room: its title, what it is doing in words, its
 /// last words, and along the bottom the run of steps and who is doing it.
 private struct SessionHero: View {
-    let droplet: OpenchamberDroplet
+    @ObservedObject var droplet: OpenchamberDroplet
     let sessionID: String
     let compact: Bool
     /// Lines of the assistant's last words; a hero sharing the page gets fewer.
@@ -406,7 +406,7 @@ private struct SessionHero: View {
 
 /// A session in a list: title and time, then what it is doing.
 private struct SessionLine: View {
-    let droplet: OpenchamberDroplet
+    @ObservedObject var droplet: OpenchamberDroplet
     let sessionID: String
     let oneLine: Bool
     /// A narrow row keeps the server, which tells the sessions apart, and drops the project.
@@ -492,7 +492,7 @@ private struct ElapsedText: View {
 
 /// The oldest request, with everything needed to decide on it in view.
 private struct ApprovalView: View {
-    let droplet: OpenchamberDroplet
+    @ObservedObject var droplet: OpenchamberDroplet
     let permission: PendingPermission
     let compact: Bool
 
@@ -572,7 +572,7 @@ private struct ApprovalView: View {
 
 /// Forms can hold any number of fields, so they are answered in OpenChamber.
 private struct FormView: View {
-    let droplet: OpenchamberDroplet
+    @ObservedObject var droplet: OpenchamberDroplet
     let form: PendingForm
     let compact: Bool
 
