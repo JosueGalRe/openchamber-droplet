@@ -79,10 +79,51 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     @Published private(set) var seat: DropletLiveActivitySeat = .none(.idle)
     @Published private(set) var tab: WidgetTab = .sessions
     @Published private(set) var today = TodayStats(day: TodayStats.key(for: Date()))
+    /// Each recent day's numbers, by `TodayStats.day`.
+    @Published private(set) var days: [String: TodayStats] = [:]
     /// What each session's last finished turn changed, once asked.
     @Published private(set) var turnDiffs: [String: TurnDiff] = [:]
     /// The session the full-shelf view shows.
     @Published private(set) var focusedSessionID: String?
+    /// Sessions that look stuck, and how; minutes change once a minute.
+    @Published private(set) var stuck: [String: StuckReason] = [:]
+    /// Sessions let run without asking, until when.
+    @Published private(set) var autoRuns: [String: AutoRun] = [:]
+    @Published private(set) var voice: VoiceState = .idle
+    /// Commands, messages and errors stay off the notch while this is on.
+    @Published private(set) var presenting = false
+
+    enum StuckReason: Equatable {
+        /// Not one event for this long.
+        case quiet(minutes: Int)
+        /// One call running this long with nothing else moving, a dev server say.
+        case stalled(command: String, minutes: Int)
+        /// The same call failing again and again.
+        case looping(command: String, failures: Int)
+    }
+
+    /// A session OpenChamber auto-approves for a while, and the mode it goes back to.
+    struct AutoRun: Codable, Equatable {
+        let sessionID: String
+        let serverID: String
+        let directory: String
+        let until: Date
+        let restore: String
+    }
+
+    enum VoiceState: Equatable {
+        case idle
+        case listening(sessionID: String, text: String)
+    }
+
+    /// One turn that ended while you were away.
+    struct AwayEntry: Equatable {
+        let sessionID: String
+        let title: String
+        let failed: Bool
+        var headline: String
+        var diff: TurnDiff?
+    }
 
     private(set) var host: DropletHost?
     private var clients: [String: OpenChamberClient] = [:]
@@ -100,6 +141,18 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     private var pendingText: [String: [String: String]] = [:]
     private var textFlush: Task<Void, Never>?
     private var focusPresentation: ExpandedSurfacePresentation?
+    /// When each session last sent anything, and last moved a step on. Kept
+    /// out of `@Published`: deltas update them per token.
+    private var lastHeard: [String: Date] = [:]
+    private var lastProgress: [String: Date] = [:]
+    private var announcedStuck: Set<String> = []
+    /// Sessions whose stuck card was waved off for the rest of their turn.
+    private var stuckSnoozed: Set<String> = []
+    private var autoRunTasks: [String: Task<Void, Never>] = [:]
+    private var voiceCapture: VoiceCapture?
+    private var awayWatcher: AwayWatcher?
+    private var clipboardWatcher: ClipboardWatcher?
+    private var awayLog: [AwayEntry] = []
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
     private let lockScreenSubject = CurrentValueSubject<LockScreenStatusEntry?, Never>(nil)
 
@@ -111,6 +164,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         if let stored = host.preferences.value(forKey: "today", as: TodayStats.self), stored.day == TodayStats.key(for: Date()) {
             today = stored
         }
+        days = host.preferences.value(forKey: "days", default: [String: TodayStats]())
         if host.environment.isHarness {
             loadSample()
         } else {
@@ -125,19 +179,48 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             let waiting = self.state.permissions.first?.sessionID ?? self.state.forms.first?.sessionID ?? self.state.busySessionIDs.first
             if let waiting { self.openSession(waiting) }
         }
+        host.shortcuts.register(id: "voice-reply", title: "Talk to the OpenChamber session that needs you", defaultShortcut: nil) { [weak self] in
+            self?.toggleVoice()
+        }
+        host.shortcuts.register(id: "presenting", title: "Hide OpenChamber's commands and messages", defaultShortcut: nil) { [weak self] in
+            guard let self else { return }
+            self.setPresenting(!self.presenting)
+        }
+        presenting = host.preferences.value(forKey: "presenting", default: false)
+        if !host.environment.isHarness {
+            resumeAutoRuns()
+            let away = AwayWatcher { [weak self] since in self?.cameBack(awaySince: since) }
+            away.start()
+            awayWatcher = away
+            clipboardWatcher = ClipboardWatcher { [weak self] text in self?.offerCopiedError(text) }
+            if offersCopiedErrors { clipboardWatcher?.start() }
+        }
         host.log.info("OpenChamber activated")
     }
 
     public func deactivate() {
+        // A session let run must not stay on auto because Droppy quit: hand
+        // each back its mode while the clients are still here; the stored
+        // runs cover a crash.
+        for run in autoRuns.values { endAutoRun(run) }
         stopFeeds()
         ticker?.cancel()
         ticker = nil
-        host?.shortcuts.unregister(id: "approve-oldest")
-        host?.shortcuts.unregister(id: "open-waiting")
+        for id in ["approve-oldest", "open-waiting", "voice-reply", "presenting"] { host?.shortcuts.unregister(id: id) }
+        voiceCapture?.stop()
+        voiceCapture = nil
+        awayWatcher?.stop()
+        awayWatcher = nil
+        clipboardWatcher?.stop()
+        clipboardWatcher = nil
+        autoRunTasks.values.forEach { $0.cancel() }
+        autoRunTasks = [:]
         for id in announcedPermissions { host?.hud.dismiss(id: hudID(id)) }
         for id in announcedForms { host?.hud.dismiss(id: formHUDID(id)) }
-        host?.hud.dismiss(id: Self.doneHUDID)
-        host?.hud.dismiss(id: Self.failedHUDID)
+        for id in announcedStuck { host?.hud.dismiss(id: stuckHUDID(id)) }
+        for id in [Self.doneHUDID, Self.failedHUDID, Self.voiceHUDID, Self.awayHUDID, Self.clipboardHUDID, Self.undoHUDID] {
+            host?.hud.dismiss(id: id)
+        }
         if focusPresentation != nil { host?.notchSurface.dismissExpandedSurface(Self.focusSurfaceID) }
         activitySubject.send(nil)
         lockScreenSubject.send(nil)
@@ -164,6 +247,52 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     var showsQuestionCards: Bool {
         host?.preferences.value(forKey: "questionCards", default: true) ?? true
+    }
+
+    var showsStuckCards: Bool {
+        host?.preferences.value(forKey: "stuckCards", default: true) ?? true
+    }
+
+    var recapsAway: Bool {
+        host?.preferences.value(forKey: "awayRecap", default: true) ?? true
+    }
+
+    var writesHeadlines: Bool {
+        host?.preferences.value(forKey: "awayHeadlines", default: true) ?? true
+    }
+
+    /// Off unless asked for: the pasteboard is the user's.
+    var offersCopiedErrors: Bool {
+        host?.preferences.value(forKey: "clipboardOffers", default: false) ?? false
+    }
+
+    static let defaultQuickReplies = ["Commit it", "Run the tests", "Continue"]
+
+    /// The one-click answers on a finished turn's card, empty ones left out.
+    var quickReplies: [String] {
+        (host?.preferences.value(forKey: "quickReplies", default: Self.defaultQuickReplies) ?? Self.defaultQuickReplies)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    func setPresenting(_ on: Bool) {
+        presenting = on
+        host?.preferences.setValue(on, forKey: "presenting")
+        if on { host?.hud.dismiss(id: Self.clipboardHUDID) }
+    }
+
+    func setOffersCopiedErrors(_ on: Bool) {
+        setPreference(on, forKey: "clipboardOffers")
+        on ? clipboardWatcher?.start() : clipboardWatcher?.stop()
+    }
+
+    /// The secret a `droppy://droplet/openchamber/…` link needs to act: any
+    /// web page can open that scheme, and none of them can know this.
+    var linkToken: String {
+        if let token = host?.preferences.value(forKey: "linkToken", default: ""), !token.isEmpty { return token }
+        let token = (0..<24).map { _ in "abcdefghijkmnopqrstuvwxyz23456789".randomElement()! }.map(String.init).joined()
+        host?.preferences.setValue(token, forKey: "linkToken")
+        return token
     }
 
     func select(_ tab: WidgetTab) {
@@ -348,6 +477,20 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
 
     private func apply(_ event: ActivityEvent, from serverID: String) {
         guard var server = serverStates[serverID] else { return }
+        let now = Date()
+        if let id = event.sessionID { lastHeard[id] = now }
+        switch event {
+        case .heard:
+            return
+        case let .toolStarted(id, _, _), let .toolFinished(id, _, _), let .stepEnded(id, _), let .textEnded(id, _):
+            lastProgress[id] = now
+        case let .executionStarted(id, _), let .executionEnded(id, _, _, _):
+            lastProgress[id] = now
+            // A new turn, or the end of one: a waved-off stuck card may speak again.
+            stuckSnoozed.remove(id)
+        default:
+            break
+        }
         switch event {
         case let .textStreamed(id, delta):
             pendingText[serverID, default: [:]][id, default: ""] += delta
@@ -415,13 +558,21 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         }
     }
 
-    /// Adds to today's numbers, starting the day over when the date has moved on.
+    /// Adds to today's numbers, starting the day over when the date has moved
+    /// on, and keeps the last two weeks of days for the week strip.
     private func countToday(_ change: (inout TodayStats) -> Void) {
         let day = TodayStats.key(for: Date())
         var stats = today.day == day ? today : TodayStats(day: day)
         change(&stats)
+        stats.lines.names = []
         today = stats
+        days[day] = stats
+        if days.count > 14 {
+            let keep = Set(days.keys.sorted().suffix(14))
+            days = days.filter { keep.contains($0.key) }
+        }
         host?.preferences.setValue(stats, forKey: "today")
+        host?.preferences.setValue(days, forKey: "days")
     }
 
     /// The server a session belongs to, for routing an action back to it.
@@ -574,6 +725,444 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         _ = host?.workspace.openSettings()
     }
 
+    // MARK: Talking back
+
+    /// Who a reply that names no session goes to: the one open over the shelf,
+    /// else the one that waits on you, else the one that finished in the last
+    /// half hour, else the one that has run longest.
+    var replyTarget: String? {
+        if let focusedSessionID { return focusedSessionID }
+        if let waiting = state.permissions.first?.sessionID ?? state.forms.first?.sessionID { return waiting }
+        let finished = state.activity
+            .filter { state.sessions[$0.key]?.parentID == nil }
+            .compactMap { id, activity in activity.finishedAt.map { (id, $0) } }
+            .max { $0.1 < $1.1 }
+        if let finished, Date().timeIntervalSince(finished.1) < 30 * 60 { return finished.0 }
+        return state.busySessionIDs.first
+    }
+
+    /// Sends a session a message; one that is busy gets it when its turn ends.
+    func send(_ text: String, to id: String, files: [URL] = []) {
+        guard let serverID = serverID(forSession: id), let client = clients[serverID] else {
+            host?.feedback.play(.failure)
+            return
+        }
+        let queue = state.activity[id]?.isBusy == true
+        let directory = state.sessions[id]?.directory
+        Task {
+            do {
+                try await client.prompt(sessionID: id, text: text, files: files, queue: queue, directory: directory)
+                host?.feedback.play(.success)
+            } catch {
+                host?.log.error("message to a session failed: \(error.localizedDescription)")
+                host?.feedback.play(.failure)
+            }
+        }
+    }
+
+    /// Files dropped on a session. Paths on this Mac mean nothing to a remote
+    /// host, so only a session on this Mac takes them.
+    func dropFiles(_ urls: [URL], on id: String) {
+        guard !urls.isEmpty else { return }
+        guard serverID(forSession: id) == ChamberServer.localID else {
+            host?.log.info("dropped files go to sessions on this Mac only")
+            host?.feedback.play(.failure)
+            return
+        }
+        host?.feedback.play(.drop)
+        let names = urls.map(\.lastPathComponent).joined(separator: ", ")
+        send("Take a look at \(names).", to: id, files: urls)
+    }
+
+    // MARK: Undo
+
+    static let undoHUDID = "openchamber.undo"
+
+    /// Rolls the last turn back after asking: its file changes, and its
+    /// messages hidden. Reversible until the session's next message.
+    func undoTurn(_ id: String) {
+        guard let prompt = state.activity[id]?.promptID, let session = state.sessions[id],
+              let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
+        let diff = turnDiffs[id]
+        let names = diff?.names ?? []
+        let files = names.isEmpty ? "the files it changed"
+            : names.count <= 3 ? Formatting.list(names) : Formatting.list(Array(names.prefix(2)) + ["\(names.count - 2) more"])
+        let lines = diff.map { " +\($0.additions) −\($0.deletions) goes away." } ?? ""
+        guard DropletConfirmationDialog.present(
+            title: "Undo this turn?",
+            message: "Puts \(files) back as they were before “\(session.title)” ran, and hides the turn's messages.\(lines) You can bring it back until the session gets its next message.",
+            confirmTitle: "Undo",
+            symbol: "arrow.uturn.backward"
+        ) else { return }
+        host?.hud.dismiss(id: Self.doneHUDID)
+        Task { [weak self] in
+            do {
+                try await client.stageRevert(sessionID: id, to: prompt, directory: session.directory)
+                guard let self else { return }
+                turnDiffs[id] = nil
+                host?.feedback.play(.success)
+                _ = host?.hud.present(DropletHUDRequest(
+                    id: Self.undoHUDID, duration: 10, accessibilityLabel: "\(session.title) undone", isExpanded: true, expandedContentHeight: 72
+                ) {
+                    NoticeStrip(motion: .still, symbol: "arrow.uturn.backward", label: "Undone", tint: AdaptiveColors.notchSurfacePrimaryText)
+                } expanded: { [weak self] in
+                    NoticeCard(
+                        provider: session.providerID ?? "", symbol: "arrow.uturn.backward", tint: AdaptiveColors.notchSurfacePrimaryText,
+                        title: session.title, status: "Turn undone", meta: session.project, detail: nil, style: .text,
+                        actions: [NoticeAction(title: "Bring it back", role: .quiet) { self?.bringBack(id) }],
+                        onOpen: { self?.openSession(id) }
+                    )
+                })
+            } catch {
+                self?.host?.log.error("undo failed: \(error.localizedDescription)")
+                self?.host?.feedback.play(.failure)
+            }
+        }
+    }
+
+    private func bringBack(_ id: String) {
+        guard let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
+        let directory = state.sessions[id]?.directory
+        host?.hud.dismiss(id: Self.undoHUDID)
+        Task {
+            do {
+                try await client.clearRevert(sessionID: id, directory: directory)
+                host?.feedback.play(.success)
+            } catch {
+                host?.log.error("bringing a turn back failed: \(error.localizedDescription)")
+                host?.feedback.play(.failure)
+            }
+        }
+    }
+
+    // MARK: Let it run
+
+    static let autoRunLength: TimeInterval = 15 * 60
+
+    /// Allows this request and lets OpenChamber approve the session's next
+    /// ones for a quarter of an hour, then hands it back the mode it had.
+    func letRun(_ permission: PendingPermission) {
+        let id = permission.sessionID
+        guard let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
+        let directory = state.sessions[id]?.directory ?? permission.directory ?? ""
+        reply(to: permission, decision: "once")
+        Task {
+            do {
+                var previous = autoRuns[id]?.restore
+                if previous == nil { previous = try await client.autoAcceptMode(sessionID: id) ?? "ask" }
+                try await client.setAutoAccept(sessionID: id, mode: "auto", directory: directory)
+                let run = AutoRun(sessionID: id, serverID: serverID, directory: directory,
+                                  until: Date().addingTimeInterval(Self.autoRunLength), restore: previous == "auto" ? "ask" : previous ?? "ask")
+                autoRuns[id] = run
+                saveAutoRuns()
+                scheduleEnd(of: run)
+            } catch {
+                host?.log.error("letting a session run failed: \(error.localizedDescription)")
+                host?.feedback.play(.failure)
+            }
+        }
+    }
+
+    /// Ends a run now, from the badge or because its time is up.
+    func endAutoRun(_ run: AutoRun) {
+        autoRunTasks[run.sessionID]?.cancel()
+        autoRunTasks[run.sessionID] = nil
+        autoRuns[run.sessionID] = nil
+        saveAutoRuns()
+        guard let client = clients[run.serverID] else { return }
+        Task { try? await client.setAutoAccept(sessionID: run.sessionID, mode: run.restore, directory: run.directory) }
+    }
+
+    /// Runs a crash or a quit left behind: each ends when it was due, the
+    /// overdue ones as soon as their server is back.
+    private func resumeAutoRuns() {
+        let stored = host?.preferences.value(forKey: "autoRuns", default: [AutoRun]()) ?? []
+        autoRuns = Dictionary(stored.map { ($0.sessionID, $0) }) { _, latest in latest }
+        autoRuns.values.forEach(scheduleEnd(of:))
+    }
+
+    private func scheduleEnd(of run: AutoRun) {
+        autoRunTasks[run.sessionID]?.cancel()
+        autoRunTasks[run.sessionID] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(max(0, run.until.timeIntervalSinceNow)))
+            // The server may still be connecting after a relaunch.
+            for _ in 0..<60 where !Task.isCancelled && self?.clients[run.serverID] == nil {
+                try? await Task.sleep(for: .seconds(2))
+            }
+            guard !Task.isCancelled, let self, autoRuns[run.sessionID] == run else { return }
+            endAutoRun(run)
+        }
+    }
+
+    private func saveAutoRuns() {
+        host?.preferences.setValue(Array(autoRuns.values), forKey: "autoRuns")
+    }
+
+    // MARK: Stuck
+
+    /// No event at all for this long reads as stuck.
+    static let quietAfter: TimeInterval = 5 * 60
+    /// One call running this long with no step moving on, a dev server say.
+    static let stalledAfter: TimeInterval = 10 * 60
+
+    private func stuckHUDID(_ id: String) -> String { "openchamber.stuck.\(id)" }
+
+    /// What looks stuck now, and a card for each new one. A session waiting
+    /// on you, retrying or compacting is not stuck.
+    private func updateStuck(now: Date) {
+        let waiting = Set(state.permissions.map(\.sessionID) + state.forms.map(\.sessionID))
+        var next: [String: StuckReason] = [:]
+        for id in state.busySessionIDs where !waiting.contains(id) {
+            guard let activity = state.activity[id], activity.retry == nil, !activity.compacting else { continue }
+            let since = activity.busySince ?? now
+            let quiet = now.timeIntervalSince(lastHeard[id] ?? since)
+            let still = now.timeIntervalSince(lastProgress[id] ?? since)
+            if let repeated = activity.repeatedFailure {
+                next[id] = .looping(command: repeated.call.object ?? repeated.call.verb, failures: repeated.failures)
+            } else if quiet >= Self.quietAfter {
+                next[id] = .quiet(minutes: Int(quiet / 60))
+            } else if let call = activity.calls.last, call.mark == .running, still >= Self.stalledAfter {
+                let narration = Narration(call: call)
+                next[id] = .stalled(command: narration.object ?? narration.verb, minutes: Int(still / 60))
+            }
+        }
+        if next != stuck { stuck = next }
+        guard let host else { return }
+        for id in announcedStuck where next[id] == nil { host.hud.dismiss(id: stuckHUDID(id)) }
+        announcedStuck.formIntersection(next.keys)
+        guard showsStuckCards, !openChamberIsInFront else { return }
+        for (id, reason) in next where !announcedStuck.contains(id) && !stuckSnoozed.contains(id) {
+            announcedStuck.insert(id)
+            presentStuckCard(id, reason: reason)
+        }
+    }
+
+    private func presentStuckCard(_ id: String, reason: StuckReason) {
+        let session = state.sessions[id]
+        let activity = state.activity[id] ?? SessionActivity()
+        let (symbol, status, detail, keep): (String, String, String, String) = switch reason {
+        case let .quiet(minutes):
+            ("pause.fill", "Quiet for \(minutes) min", activity.currentCall.map { Narration(call: $0).sentence } ?? "No step running", "Keep waiting")
+        case let .stalled(command, minutes):
+            ("hourglass", "Running for \(minutes) min", command, "Keep waiting")
+        case let .looping(command, failures):
+            ("arrow.triangle.2.circlepath", "Going in circles", "\(command) failed \(failures) times", "Let it try")
+        }
+        let meta = [session?.project, serverLabel(forSession: id)].compactMap { $0 }.joined(separator: " · ")
+        _ = host?.hud.present(DropletHUDRequest(
+            id: stuckHUDID(id), duration: nil,
+            accessibilityLabel: "\(session?.title ?? "A session"): \(status)", isExpanded: true, expandedContentHeight: 104
+        ) {
+            NoticeStrip(motion: .still, symbol: symbol, label: "Stuck?", tint: .yellow)
+        } expanded: { [weak self] in
+            NoticeCard(
+                provider: session?.providerID ?? "", symbol: symbol, tint: .yellow, title: session?.title ?? "A session",
+                status: status, meta: meta, detail: detail, style: .code, hidesDetail: self?.presenting ?? false,
+                actions: [
+                    NoticeAction(title: "Stop", role: .destructive) {
+                        self?.interrupt(sessionID: id)
+                        self?.host?.hud.dismiss(id: self?.stuckHUDID(id) ?? "")
+                    },
+                    NoticeAction(title: keep, role: .quiet) { self?.snoozeStuck(id) },
+                ],
+                onOpen: { self?.openSession(id) }
+            )
+        })
+    }
+
+    /// Waves a stuck card off for the rest of the session's turn.
+    func snoozeStuck(_ id: String) {
+        stuckSnoozed.insert(id)
+        host?.hud.dismiss(id: stuckHUDID(id))
+    }
+
+    // MARK: Voice
+
+    static let voiceHUDID = "openchamber.voice"
+
+    var voiceIsReady: Bool {
+        host?.permissions.status(for: .microphone) == .granted && host?.permissions.status(for: .speechRecognition) == .granted
+    }
+
+    /// Asked from the settings pane, never from the notch.
+    func requestVoicePermissions() async {
+        _ = await host?.permissions.request(.microphone)
+        _ = await host?.permissions.request(.speechRecognition)
+        objectWillChange.send()
+    }
+
+    /// The shortcut: the first press starts listening for the session a reply
+    /// goes to, the second sends what was said.
+    func toggleVoice() {
+        if case .listening = voice { sendVoice(); return }
+        guard let host else { return }
+        guard voiceIsReady else {
+            _ = host.workspace.openSettings()
+            return
+        }
+        guard let target = replyTarget else {
+            host.feedback.play(.failure)
+            return
+        }
+        let capture = VoiceCapture(onText: { [weak self] text in
+            guard let self, case let .listening(id, _) = voice else { return }
+            voice = .listening(sessionID: id, text: text)
+        }, onEnd: {})
+        do {
+            try capture.start()
+        } catch {
+            host.log.error("voice reply could not start: \(error.localizedDescription)")
+            host.feedback.play(.failure)
+            return
+        }
+        voiceCapture = capture
+        voice = .listening(sessionID: target, text: "")
+        _ = host.hud.present(DropletHUDRequest(
+            id: Self.voiceHUDID, duration: nil, priority: .high,
+            accessibilityLabel: "Listening for \(state.sessions[target]?.title ?? "a session")", isExpanded: true, expandedContentHeight: 104
+        ) { [weak self] in
+            if let self { VoiceStrip(droplet: self) }
+        } expanded: { [weak self] in
+            if let self { VoiceCard(droplet: self) }
+        })
+    }
+
+    func sendVoice() {
+        guard case let .listening(id, text) = voice else { return }
+        cancelVoice()
+        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !words.isEmpty { send(words, to: id) }
+    }
+
+    func cancelVoice() {
+        voiceCapture?.stop()
+        voiceCapture = nil
+        voice = .idle
+        host?.hud.dismiss(id: Self.voiceHUDID)
+    }
+
+    // MARK: While you were away
+
+    static let awayHUDID = "openchamber.away"
+
+    /// A turn that ended while you were gone, with a headline: the server's
+    /// small model writes one when allowed, the message's first sentence until then.
+    private func noteWhileAway(_ id: String, title: String, failed: Bool, text: String?, directory: String) {
+        awayLog.append(AwayEntry(sessionID: id, title: title, failed: failed,
+                                 headline: Formatting.headline(from: text) ?? (failed ? "the turn failed" : "finished"), diff: nil))
+        guard writesHeadlines, let text, !text.isEmpty, !directory.isEmpty,
+              let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
+        let ask = "In eight words at most, say what this coding agent \(failed ? "ran into" : "did"). Answer with those words only.\n\n"
+            + String(text.prefix(2_000))
+        Task {
+            guard let line = try? await client.generate(prompt: ask, directory: directory),
+                  let headline = Formatting.headline(from: line),
+                  let index = awayLog.lastIndex(where: { $0.sessionID == id }) else { return }
+            awayLog[index].headline = headline
+        }
+    }
+
+    /// One card for everything that happened while you were gone, instead of
+    /// the pile of cards nobody saw.
+    private func cameBack(awaySince since: Date) {
+        let log = awayLog
+        awayLog = []
+        let minutes = Int(Date().timeIntervalSince(since) / 60)
+        guard recapsAway, minutes >= 5, let host else { return }
+        var seen: Set<String> = []
+        let waiting = (state.permissions.map(\.sessionID) + state.forms.map(\.sessionID)).filter { seen.insert($0).inserted }
+        // The latest turn of each session.
+        let ended = Dictionary(log.map { ($0.sessionID, $0) }) { _, latest in latest }.values
+            .filter { !waiting.contains($0.sessionID) }
+            .sorted { $0.title < $1.title }
+        guard !ended.isEmpty || !waiting.isEmpty else { return }
+        let rows = min(4, ended.count + waiting.count)
+        _ = host.hud.present(DropletHUDRequest(
+            id: Self.awayHUDID, duration: 30,
+            accessibilityLabel: "While you were away: \(ended.count) done, \(waiting.count) waiting", isExpanded: true,
+            expandedContentHeight: CGFloat(30 + rows * 22 + 44)
+        ) {
+            NoticeStrip(motion: .still, symbol: "moon.fill", label: "While away", tint: AdaptiveColors.notchSurfacePrimaryText)
+        } expanded: { [weak self] in
+            if let self {
+                AwayCard(droplet: self, minutes: minutes, ended: Array(ended), waiting: waiting)
+            }
+        })
+    }
+
+    // MARK: Copied errors
+
+    static let clipboardHUDID = "openchamber.clipboard"
+
+    /// Offers an error you just copied to the session it most likely belongs
+    /// to. Nothing is sent until you press Send.
+    private func offerCopiedError(_ text: String) {
+        guard offersCopiedErrors, !presenting, !openChamberIsInFront, let host,
+              let target = clipboardTarget(for: text), let session = state.sessions[target] else { return }
+        let meta = ["You copied an error", session.project, serverLabel(forSession: target)].compactMap { $0 }.joined(separator: " · ")
+        let excerpt = text.split(separator: "\n", omittingEmptySubsequences: true).prefix(2).joined(separator: "\n")
+        _ = host.hud.present(DropletHUDRequest(
+            id: Self.clipboardHUDID, duration: 12, accessibilityLabel: "Send the copied error to \(session.title)?",
+            isExpanded: true, expandedContentHeight: 104
+        ) {
+            NoticeStrip(motion: .still, symbol: "doc.on.clipboard", label: "Error", tint: .red)
+        } expanded: { [weak self] in
+            NoticeCard(
+                provider: session.providerID ?? "", symbol: "doc.on.clipboard", tint: AdaptiveColors.notchSurfacePrimaryText,
+                title: "Send to \(session.title)?", status: "", meta: meta, detail: excerpt, style: .code,
+                actions: [
+                    NoticeAction(title: "Send", role: .accent) {
+                        self?.send("I copied this error:\n\n```\n\(text.prefix(8_000))\n```", to: target)
+                        self?.host?.hud.dismiss(id: Self.clipboardHUDID)
+                    },
+                    NoticeAction(title: "Not now", role: .quiet) { self?.host?.hud.dismiss(id: Self.clipboardHUDID) },
+                ],
+                onOpen: { self?.openSession(target) }
+            )
+        })
+    }
+
+    /// The session whose project the error names, busy ones first, else the
+    /// session a reply would go to.
+    private func clipboardTarget(for text: String) -> String? {
+        let named = state.sessions.values
+            .filter { $0.parentID == nil && !$0.directory.isEmpty && (text.contains($0.directory) || text.contains("/\($0.project)/")) }
+            .max { lhs, rhs in
+                let a = state.activity[lhs.id], b = state.activity[rhs.id]
+                return (a?.isBusy == true ? 1 : 0, a?.finishedAt ?? .distantPast) < (b?.isBusy == true ? 1 : 0, b?.finishedAt ?? .distantPast)
+            }
+        return named?.id ?? replyTarget
+    }
+
+    // MARK: Starting sessions
+
+    /// A new session in a project, by folder name or path, with its first message.
+    func startSession(project: String, prompt: String) {
+        let path = (project as NSString).expandingTildeInPath
+        let known = state.sessions.values.first {
+            path.hasPrefix("/") ? $0.directory == path : $0.project.caseInsensitiveCompare(project) == .orderedSame
+        }
+        let directory = known?.directory ?? (path.hasPrefix("/") ? path : nil)
+        let serverID = known.flatMap { serverID(forSession: $0.id) }
+            ?? (servers.contains { $0.isLocal } ? ChamberServer.localID : servers.first?.id)
+        guard let directory, let serverID, let client = clients[serverID], !prompt.isEmpty else {
+            host?.log.error("no project \"\(project)\" to start a session in")
+            host?.feedback.play(.failure)
+            return
+        }
+        Task {
+            do {
+                guard let session = try await client.createSession(directory: directory) else { throw OpenChamberError.invalidResponse }
+                apply(.sessionsListed([session]), from: serverID)
+                try await client.prompt(sessionID: session.id, text: prompt, queue: false, directory: directory)
+                host?.feedback.play(.success)
+            } catch {
+                host?.log.error("starting a session failed: \(error.localizedDescription)")
+                host?.feedback.play(.failure)
+            }
+        }
+    }
+
     // MARK: Presenting
 
     /// Merges the servers, recomputes the phase and pushes it to the notch and
@@ -608,6 +1197,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 roundedBottomText: "OpenChamber"
             ))
         }
+        updateStuck(now: now)
         updateTicker()
     }
 
@@ -659,8 +1249,10 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                     provider: session?.providerID ?? "", symbol: "hand.raised.fill", tint: .orange,
                     title: session?.title ?? "A session", status: "Wants to \(verb)", meta: meta,
                     detail: command.isEmpty ? permission.action : command, style: .code,
+                    hidesDetail: self?.presenting ?? false,
                     actions: [
                         NoticeAction(title: "Allow once", role: .accent) { self?.reply(to: permission, decision: "once") },
+                        NoticeAction(title: "Let it run 15m", role: .quiet) { self?.letRun(permission) },
                         NoticeAction(title: "Reject", role: .destructive) { self?.reply(to: permission, decision: "reject") },
                     ],
                     onOpen: { self?.openSession(permission.sessionID) }
@@ -689,19 +1281,26 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         let open: @MainActor () -> Void = { [weak self] in self?.openSession(id) }
         // Whether a card may show; what the turn changed is counted either way.
         let showsCard = !openChamberIsInFront
+        let last = state.activity[id]?.lastText
+        if awayWatcher?.awaySince != nil, recapsAway {
+            noteWhileAway(id, title: session.title, failed: outcome == .failed, text: outcome == .failed ? error : last, directory: session.directory)
+        }
+        let replies = Array(quickReplies.prefix(3))
 
         if outcome == .failed {
             guard showsCard, showsFailureCards else { return }
             _ = host.hud.present(DropletHUDRequest(
-                id: Self.failedHUDID, duration: 10, priority: .high,
-                accessibilityLabel: "\(session.title) failed", isExpanded: true, expandedContentHeight: 72
+                id: Self.failedHUDID, duration: 12, priority: .high,
+                accessibilityLabel: "\(session.title) failed", isExpanded: true, expandedContentHeight: replies.isEmpty ? 72 : 108
             ) {
                 NoticeStrip(motion: .failed, symbol: "exclamationmark.triangle.fill", label: "Failed", tint: .red)
-            } expanded: {
+            } expanded: { [weak self] in
                 NoticeCard(
                     provider: session.providerID ?? "", symbol: "exclamationmark", tint: .red, title: session.title,
                     status: ["Failed", turn.map { "after \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " "),
-                    meta: place.joined(separator: " · "), detail: error ?? "The turn failed.", style: .code, onOpen: open
+                    meta: place.joined(separator: " · "), detail: error ?? "The turn failed.", style: .code,
+                    hidesDetail: self?.presenting ?? false,
+                    actions: self?.replyActions(replies, to: id, closing: Self.failedHUDID) ?? [], onOpen: open
                 )
             })
             return
@@ -711,7 +1310,6 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         let now = Date()
         if carded { recentTurnEnds = recentTurnEnds.filter { now.timeIntervalSince($0) < 5 } + [now] }
         let others = recentTurnEnds.count - 1
-        let last = state.activity[id]?.lastText
         let prompt = state.activity[id]?.promptID
         let client = serverID(forSession: id).flatMap { clients[$0] }
         Task { [weak self] in
@@ -725,22 +1323,46 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             if let diff, !diff.isEmpty {
                 turnDiffs[id] = diff
                 countToday { $0.lines.additions += diff.additions; $0.lines.deletions += diff.deletions; $0.lines.files += diff.files }
+                if let index = awayLog.lastIndex(where: { $0.sessionID == id }) { awayLog[index].diff = diff }
             }
             guard carded else { return }
+            let changed: TurnDiff? = diff?.isEmpty == false ? diff : nil
+            let undoable = changed != nil && prompt != nil
+            let height: CGFloat = (last == nil ? 36 : 72) + (replies.isEmpty ? 0 : 36)
+            let status = ["Done", turn.map { "in \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " ")
+            let meta = ((others > 0 ? ["+\(others) more"] : []) + place).joined(separator: " · ")
             _ = host.hud.present(DropletHUDRequest(
-                id: Self.doneHUDID, duration: 5,
-                accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: last == nil ? 36 : 72
+                id: Self.doneHUDID, duration: replies.isEmpty ? 5 : 10,
+                accessibilityLabel: "\(session.title) is done", isExpanded: true, expandedContentHeight: height
             ) {
                 NoticeStrip(motion: .still, symbol: "checkmark.circle.fill", label: others > 0 ? "\(others + 1) done" : "Done", tint: .green)
-            } expanded: {
-                NoticeCard(
-                    provider: session.providerID ?? "", symbol: "checkmark", tint: .green, title: session.title,
-                    status: ["Done", turn.map { "in \(Formatting.elapsed($0))" }].compactMap { $0 }.joined(separator: " "),
-                    meta: ((others > 0 ? ["+\(others) more"] : []) + place).joined(separator: " · "),
-                    diff: diff?.isEmpty == false ? diff : nil,
-                    detail: last, style: .text, onOpen: open
-                )
+            } expanded: { [weak self] in
+                self?.doneCard(id, session: session, status: status, meta: meta, diff: changed, last: last,
+                               replies: replies, undoable: undoable, open: open)
             })
+        }
+    }
+
+    private func doneCard(
+        _ id: String, session: SessionInfo, status: String, meta: String, diff: TurnDiff?, last: String?,
+        replies: [String], undoable: Bool, open: @escaping @MainActor () -> Void
+    ) -> NoticeCard {
+        var undo: (@MainActor () -> Void)?
+        if undoable { undo = { [weak self] in self?.undoTurn(id) } }
+        return NoticeCard(
+            provider: session.providerID ?? "", symbol: "checkmark", tint: .green, title: session.title,
+            status: status, meta: meta, diff: diff, detail: last, style: .text, hidesDetail: presenting,
+            actions: replyActions(replies, to: id, closing: Self.doneHUDID), onUndo: undo, onOpen: open
+        )
+    }
+
+    /// The quick replies as a card's buttons, the first in accent.
+    func replyActions(_ texts: [String], to id: String, closing hud: String) -> [NoticeAction] {
+        texts.enumerated().map { index, text in
+            NoticeAction(title: text, role: index == 0 ? .accent : .quiet) { [weak self] in
+                self?.send(text, to: id)
+                self?.host?.hud.dismiss(id: hud)
+            }
         }
     }
 
@@ -892,6 +1514,19 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         return id.flatMap { state.sessions[$0]?.providerID }
     }
 
+    /// The agent of the turn that ended last, which hops on the notch.
+    var lastFinishedProvider: String? {
+        state.activity.compactMap { id, activity in activity.finishedAt.map { (id, $0) } }
+            .max { $0.1 < $1.1 }
+            .flatMap { state.sessions[$0.0]?.providerID }
+    }
+
+    /// The session the microphone is listening for.
+    var voiceSessionID: String? {
+        if case let .listening(id, _) = voice { return id }
+        return nil
+    }
+
     /// A dot per running session for the notch's wing, `true` for one that
     /// waits on you. Nil for one session, which needs no dot, and past four,
     /// which the wing has no room for.
@@ -997,6 +1632,70 @@ extension OpenchamberDroplet: ExpandedSurfaceProviding {
     }
 }
 
+extension OpenchamberDroplet.StuckReason {
+    /// What a row says: `Quiet for 6 min`, `pnpm test failed 4 times`.
+    var sentence: String {
+        switch self {
+        case let .quiet(minutes): return "Quiet for \(minutes) min"
+        case let .stalled(command, minutes): return "\(command) running for \(minutes) min"
+        case let .looping(command, failures): return "\(command) failed \(failures) times"
+        }
+    }
+
+    /// The same without the command, for presentation mode.
+    var headline: String {
+        switch self {
+        case let .quiet(minutes): return "Quiet for \(minutes) min"
+        case let .stalled(_, minutes): return "Running for \(minutes) min"
+        case .looping: return "Going in circles"
+        }
+    }
+}
+
+// MARK: - Links
+
+/// `droppy://droplet/openchamber/<action>?…`, for Raycast, Shortcuts, a
+/// Stream Deck or a script. Every web page can open that scheme, so whatever
+/// acts on a session needs `token=`, the secret in settings; opening and
+/// showing a session need none.
+extension OpenchamberDroplet: DropletURLHandling {
+    public func handle(_ request: DropletURLRequest) {
+        let action = request.path.lowercased()
+        guard !LinkAction.needsToken(action) || request.query["token"] == linkToken else {
+            host?.log.error("refused droppy://droplet/openchamber/\(action): the token is missing or wrong")
+            host?.feedback.play(.failure)
+            return
+        }
+        let named = request.query["session"].flatMap { state.sessions[$0] == nil ? nil : $0 }
+        let text = request.query["text"].map { String($0.prefix(10_000)) }
+        switch action {
+        case "new":
+            startSession(project: request.query["project"] ?? "", prompt: String((request.query["prompt"] ?? "").prefix(10_000)))
+        case "reply":
+            if let text, !text.isEmpty, let id = named ?? replyTarget { send(text, to: id) }
+        case "approve":
+            if let oldest = state.permissions.first { reply(to: oldest, decision: "once") }
+        case "stop":
+            if let id = named ?? state.permissions.first?.sessionID ?? state.busySessionIDs.first { interrupt(sessionID: id) }
+        case "open":
+            if let id = named ?? replyTarget { openSession(id) }
+        case "focus":
+            if let id = named ?? replyTarget { focus(id) }
+        case "voice":
+            toggleVoice()
+        default:
+            host?.log.info("no link action \"\(action)\"")
+        }
+    }
+}
+
+enum LinkAction {
+    /// What a link may do without the token: look, never act.
+    static func needsToken(_ action: String) -> Bool {
+        !["open", "focus"].contains(action)
+    }
+}
+
 // MARK: - HUD, lock screen, menu bar
 
 extension OpenchamberDroplet: HUDPresenting {}
@@ -1088,6 +1787,11 @@ private extension OpenchamberDroplet {
         serverStates = [mac.id: local, remote.id: work]
         turnDiffs = ["s1": TurnDiff(files: 3, additions: 42, deletions: 7)]
         today = TodayStats(day: TodayStats.key(for: now), turns: 7, seconds: 6_120, answered: 3, lines: TurnDiff(files: 9, additions: 318, deletions: 96))
+        days = Dictionary(uniqueKeysWithValues: [2.4, 0.5, 0.1, 3.1, 2.2, 3.6, 1.7].enumerated().map { index, hours in
+            let day = TodayStats.key(for: now.addingTimeInterval(Double(index - 6) * 86_400))
+            return (day, TodayStats(day: day, seconds: hours * 3_600))
+        })
+        autoRuns["w1"] = AutoRun(sessionID: "w1", serverID: "remote", directory: "/home/me/work/api", until: now.addingTimeInterval(692), restore: "ask")
         focusedSessionID = "s1"
         publish(now: now)
     }

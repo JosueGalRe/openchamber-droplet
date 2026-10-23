@@ -191,13 +191,16 @@ struct TurnDiff: Equatable, Sendable, Codable {
     var files = 0
     var additions = 0
     var deletions = 0
+    /// The files' names, for saying what an undo puts back.
+    var names: [String] = []
 
     var isEmpty: Bool { files == 0 }
 
-    init(files: Int = 0, additions: Int = 0, deletions: Int = 0) {
+    init(files: Int = 0, additions: Int = 0, deletions: Int = 0, names: [String] = []) {
         self.files = files
         self.additions = additions
         self.deletions = deletions
+        self.names = names
     }
 
     /// One `FileDiffInfo` per file, as `session.diff` returns them.
@@ -205,6 +208,7 @@ struct TurnDiff: Equatable, Sendable, Codable {
         self.files = files.count
         additions = files.compactMap { ($0["additions"] as? NSNumber)?.intValue }.reduce(0, +)
         deletions = files.compactMap { ($0["deletions"] as? NSNumber)?.intValue }.reduce(0, +)
+        names = files.compactMap { ($0["file"] as? String).map { ($0 as NSString).lastPathComponent } }
     }
 }
 
@@ -375,6 +379,50 @@ actor OpenChamberClient {
             directory: form.directory,
             body: ["answer": [key: value]]
         )
+    }
+
+    /// Sends the session a message. `queue` waits for a running turn to end
+    /// instead of steering it; `files` are `file://` URIs on the server's disk.
+    func prompt(sessionID: String, text: String, files: [URL] = [], queue: Bool, directory: String?) async throws {
+        var body: [String: Any] = ["text": text]
+        if !files.isEmpty { body["files"] = files.map { ["uri": $0.absoluteString, "name": $0.lastPathComponent] } }
+        if queue { body["delivery"] = "queue" }
+        _ = try await json("POST", "api/session/\(sessionID.urlPathEncoded)/prompt", directory: directory, body: body)
+    }
+
+    /// A new session in `directory`, on the server's default agent and model.
+    func createSession(directory: String) async throws -> SessionInfo? {
+        let body = try await json("POST", "api/session", directory: directory, body: ["location": ["directory": directory]]) as? [String: Any]
+        return ((body?["data"] as? [String: Any]) ?? body).flatMap(ActivityWire.session(from:))
+    }
+
+    /// Hides `messageID` and everything after it and rolls their file changes
+    /// back. The next prompt makes it final; ``clearRevert`` brings it all back.
+    func stageRevert(sessionID: String, to messageID: String, directory: String?) async throws {
+        _ = try await json("POST", "api/session/\(sessionID.urlPathEncoded)/revert/stage", directory: directory,
+                           body: ["messageID": messageID, "files": true])
+    }
+
+    func clearRevert(sessionID: String, directory: String?) async throws {
+        _ = try await json("DELETE", "api/session/\(sessionID.urlPathEncoded)/revert", directory: directory)
+    }
+
+    /// The permission mode OpenChamber holds for a session: `ask`, `safety` or
+    /// `auto`, nil when none was set and it follows its parent or `ask`.
+    func autoAcceptMode(sessionID: String) async throws -> String? {
+        let body = try await json("GET", "api/permission-auto-accept") as? [String: Any]
+        return (body?["modes"] as? [String: String])?[sessionID]
+    }
+
+    func setAutoAccept(sessionID: String, mode: String, directory: String?) async throws {
+        _ = try await json("PUT", "api/permission-auto-accept/sessions/\(sessionID.urlPathEncoded)",
+                           body: ["mode": mode, "directory": directory ?? ""])
+    }
+
+    /// One answer from the server's small model, through a project it has open.
+    func generate(prompt: String, directory: String) async throws -> String? {
+        let body = try await json("POST", "api/experimental/generate", directory: directory, body: ["prompt": prompt]) as? [String: Any]
+        return (body?["text"] as? String) ?? ((body?["data"] as? [String: Any])?["text"] as? String)
     }
 
     /// `decision` is OpenCode's `once`, `always` or `reject`.

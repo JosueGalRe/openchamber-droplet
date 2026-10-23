@@ -1,15 +1,15 @@
 {
   "id": "openchamber",
   "name": "OpenChamber",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "summary": "Your OpenChamber sessions, approvals and usage in the notch",
-  "description": "OpenChamber puts the coding sessions you run in OpenChamber beside the notch. The shelf widget says what each one is doing in plain words, such as Running swift test or Editing Views.swift, with its model and reasoning level, agent profile and server, how full its context window is, and how long the turn has run; while the agent writes, its words appear as it writes them. Several sessions show at once: click one to open it in place, hover what it is doing to read the whole command and its last message, or expand it over the whole shelf to see every step of the turn, its full last message, and Stop.\n\nWhen a session asks for permission, a card appears on the notch with the exact command, and you allow it once or reject it without leaving what you are doing; the widget keeps every pending request, with Always for the ones you trust. A question with a short list of answers is answered from its card too. Cards also tell you when a turn ends, with how many lines and files it changed, or fails, unless OpenChamber is already in front.\n\nThe widget's Usage page shows a ring per provider with what is left of its tightest window, a mark where an even pace would be, when a window will run out before it resets, every window on hover, and a notice as one passes 80% and 95%. With nothing running, the widget shows what your agents did today. Beside the notch, the agent's own mascot works while it does, with a dot for each running session.\n\nIt watches every server OpenChamber Desktop on this Mac is set up for, this Mac's own and your remote hosts, directly or through OpenChamber's relay, using the tokens Desktop already has, so there is nothing to pair.",
+  "description": "OpenChamber puts the coding sessions you run in OpenChamber beside the notch. The shelf widget says what each one is doing in plain words, such as Running swift test or Editing Views.swift, with its model and reasoning level, agent profile and server, how full its context window is, and how long the turn has run; while the agent writes, its words appear as it writes them. Several sessions show at once: click one to open it in place, hover what it is doing to read the whole command and its last message, or expand it over the whole shelf to see every step of the turn, its full last message, and Stop.\n\nWhen a session asks for permission, a card appears on the notch with the exact command, and you allow it once or reject it without leaving what you are doing; the widget keeps every pending request, with Always for the ones you trust. A question with a short list of answers is answered from its card too. Cards also tell you when a turn ends, with how many lines and files it changed, or fails, unless OpenChamber is already in front.\n\nThe widget's Usage page shows a ring per provider with what is left of its tightest window, a mark where an even pace would be, when a window will run out before it resets, every window on hover, and a notice as one passes 80% and 95%. With nothing running, the widget shows what your agents did today. Beside the notch, the agent's own mascot works while it does, with a dot for each running session.\n\nIt notices what you would otherwise miss: a session quiet for five minutes, one command running for ten, or the same call failing again and again gets a card with Stop. A finished turn's card has one-click replies, such as Commit it or Run the tests, and an undo that rolls the turn back after asking. Let it run 15m approves a session's requests for a quarter of an hour and then asks again. Press a shortcut and talk to answer a session without a window. Come back from a locked screen to one card of what finished and what waits on you, with a headline for each turn. Copy an error and it offers to send it to the session it belongs to, only if you turn that on. Drop files on a session to hand them over, start sessions from Raycast or a script through droppy:// links that need a token, and hide commands and messages while you share your screen.\n\nIt watches every server OpenChamber Desktop on this Mac is set up for, this Mac's own and your remote hosts, directly or through OpenChamber's relay, using the tokens Desktop already has, so there is nothing to pair.",
   "category": "Productivity",
   "kit": {
     "abi": 1,
-    "minAPI": "1.9.0"
+    "minAPI": "1.19.0"
   },
-  "minAppVersion": "15.3.0",
+  "minAppVersion": "16.0.1",
   "capabilities": [
     "network-client",
     "hud",
@@ -17,7 +17,9 @@
     "global-shortcuts",
     "lock-screen",
     "menu-bar",
-    "expanded-surface"
+    "expanded-surface",
+    "microphone",
+    "speech-recognition"
   ],
   "surfaces": [
     "shelf-widget",

@@ -260,6 +260,37 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(ActivityWire.form(from: ["id": "f3", "sessionID": "s1", "fields": [["key": "a", "type": "string"]]], directory: nil)?.choice == nil)
 }
 
+@Test func theSameCallFailingThreeTimesIsALoop() {
+    var activity = SessionActivity()
+    let runs: [(String, ToolMark)] = [("pnpm test", .failed), ("a.ts", .succeeded), ("pnpm test", .failed), ("pnpm test", .failed)]
+    activity.calls = runs.enumerated().map { index, run in
+        ToolCall(id: "c\(index)", name: run.0 == "a.ts" ? "edit" : "bash", target: run.0, mark: run.1)
+    }
+    #expect(activity.repeatedFailure?.failures == 3)
+    #expect(activity.repeatedFailure?.call.object == "pnpm test")
+
+    // Passing on its latest try ends the loop.
+    activity.calls.append(ToolCall(id: "c9", name: "bash", target: "pnpm test", mark: .succeeded))
+    #expect(activity.repeatedFailure == nil)
+}
+
+@Test func anyOtherEventAboutASessionCountsAsHearingFromIt() {
+    let event = ActivityWire.event(from: wire("session.reasoning.delta", ["sessionID": "s1", "delta": "hmm"]), now: t0)
+    #expect(event == .heard(sessionID: "s1"))
+    #expect(event?.sessionID == "s1")
+    // Without a session there is nothing to hear from.
+    #expect(ActivityWire.event(from: wire("vcs.status.changed", [:]), now: t0) == nil)
+}
+
+@Test func aHeadlineIsTheFirstSentenceWithoutMarkdown() {
+    #expect(Formatting.headline(from: "Switched `formatDate` to UTC. Then added a test.") == "switched formatDate to UTC")
+    #expect(Formatting.headline(from: "UTC everywhere now\nmore below") == "UTC everywhere now")
+    #expect(Formatting.headline(from: "   ") == nil)
+    #expect(Formatting.headline(from: String(repeating: "word ", count: 30), limit: 20)?.count == 20)
+    #expect(Formatting.list(["a", "b", "c"]) == "a, b and c")
+    #expect(Formatting.list(["a"]) == "a")
+}
+
 @Test func finishedCallsReadInThePastTense() {
     #expect(Narration(call: ToolCall(id: "c", name: "bash", target: "pnpm test", mark: .succeeded)).pastVerb == "Ran")
     #expect(Narration(call: ToolCall(id: "c", name: "edit", target: "a.swift", mark: .failed)).pastVerb == "Edited")

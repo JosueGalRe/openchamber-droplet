@@ -121,8 +121,29 @@ private var relay: [String: Any] { [
         ["file": "a.swift", "additions": 40, "deletions": 2, "status": "modified"],
         ["file": "b.swift", "additions": 2, "deletions": 5, "status": "added"],
     ])
-    #expect(diff == TurnDiff(files: 2, additions: 42, deletions: 7))
+    #expect(diff == TurnDiff(files: 2, additions: 42, deletions: 7, names: ["a.swift", "b.swift"]))
     #expect(TurnDiff(files: []).isEmpty)
+}
+
+@Test func copiedErrorsAreTheOnesWithAStackOrADiagnostic() {
+    #expect(ErrorText.looksLikeError("TypeError: Cannot read properties of undefined (reading 'id')\n    at serializeUser (src/users/serialize.ts:42:18)"))
+    #expect(ErrorText.looksLikeError("Traceback (most recent call last):\n  File \"app.py\", line 3, in <module>\n    main()"))
+    #expect(ErrorText.looksLikeError("Sources/App/Views.swift:12:5: error: cannot find 'foo' in scope"))
+    #expect(ErrorText.looksLikeError("error[E0308]: mismatched types\n --> src/main.rs:4:18"))
+    #expect(ErrorText.looksLikeError("src/a.ts(3,1): error TS2304: Cannot find name 'x'."))
+    // Prose that mentions an error, a URL, a short word: none of them.
+    #expect(!ErrorText.looksLikeError("I think there was an error: the build took long"))
+    #expect(!ErrorText.looksLikeError("https://example.com/errors/42"))
+    #expect(!ErrorText.looksLikeError("Error"))
+}
+
+@Test func linksActOnlyWithTheToken() {
+    #expect(LinkAction.needsToken("new"))
+    #expect(LinkAction.needsToken("approve"))
+    #expect(LinkAction.needsToken("reply"))
+    #expect(LinkAction.needsToken("anything-new"))
+    #expect(!LinkAction.needsToken("open"))
+    #expect(!LinkAction.needsToken("focus"))
 }
 
 @Test func paceMarksAnEvenRateAndWhenTheWindowRunsDry() {

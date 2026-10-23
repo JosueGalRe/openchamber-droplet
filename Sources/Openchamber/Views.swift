@@ -9,6 +9,7 @@
 
 import DroppyKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum Formatting {
     /// `4:12`, `1:04:12`.
@@ -83,6 +84,27 @@ enum Formatting {
         return minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
     }
 
+    /// `a.swift, b.swift and c.swift`.
+    static func list(_ items: [String]) -> String {
+        guard items.count > 1 else { return items.first ?? "" }
+        return items.dropLast().joined(separator: ", ") + " and " + items[items.count - 1]
+    }
+
+    /// A message's first sentence, its markdown dropped, short enough for one
+    /// row; nil for nothing to say.
+    static func headline(from text: String?, limit: Int = 70) -> String? {
+        guard let text else { return nil }
+        let plain = String(inlineMarkdown(text).characters)
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"“”'")))
+        guard !plain.isEmpty else { return nil }
+        let line = plain.split(whereSeparator: \.isNewline).first.map(String.init) ?? plain
+        let sentence = line.range(of: #"[.!?](\s|$)"#, options: .regularExpression).map { String(line[..<$0.lowerBound]) } ?? line
+        // It follows the title in a row: "Fix the test — switched to UTC". An
+        // acronym keeps its capitals.
+        let first = sentence.dropFirst().first?.isLowercase == true ? sentence.prefix(1).lowercased() + sentence.dropFirst() : sentence
+        return first.count > limit ? String(first.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…" : first
+    }
+
     /// The end of text still being written, where the new words are.
     static func tail(_ text: String, limit: Int = 160) -> String {
         guard text.count > limit else { return text }
@@ -127,21 +149,65 @@ struct CompactGlyph: View {
     var body: some View {
         // The agent's own mascot while it works or waits, as Agents shows it;
         // the cube for everything else, whose ring tells retry, done and failed.
-        let (mascot, works): (AgentMascot.Kind?, Bool) = switch droplet.phase {
-        case .working: (droplet.leadProvider.flatMap(AgentMascot.Kind.init(provider:)), true)
-        case .waiting: (droplet.leadProvider.flatMap(AgentMascot.Kind.init(provider:)), false)
-        default: (nil, false)
+        let kind = { (provider: String?) in provider.flatMap(AgentMascot.Kind.init(provider:)) }
+        let (mascot, mood): (AgentMascot.Kind?, AgentMascot.Mood) = switch droplet.phase {
+        case .working: (kind(droplet.leadProvider), .working)
+        case .waiting: (kind(droplet.leadProvider), .still)
+        case .finishing: (kind(droplet.lastFinishedProvider), .done)
+        case let .failed(id): (kind(droplet.state.sessions[id]?.providerID), .failed)
+        case .idle, .retrying: (nil, .still)
         }
         Group {
             if let mascot {
-                // Still while it waits: anything that moves reads as "working".
-                AgentMascot(kind: mascot, size: size, isAnimating: works && droplet.seat.isPresented)
+                AgentMascot(kind: mascot, size: size, isAnimating: droplet.seat.isPresented, mood: mood)
             } else {
                 ChamberGlyph(motion: droplet.glyphMotion, size: size, isAnimating: droplet.seat.isPresented)
             }
         }
-        .id(mascot?.rawValue ?? "cube")
+        .overlay {
+            // A session let run: a yellow ring that empties as its time runs out.
+            if let run = droplet.autoRuns.values.min(by: { $0.until < $1.until }) {
+                AutoRunRing(until: run.until).padding(-3)
+            }
+        }
+        .id("\(mascot?.rawValue ?? "cube").\(mood)")
         .transition(DroppyTransition.compactContent)
+    }
+}
+
+/// What is left of a session's run without asking, as a ring.
+struct AutoRunRing: View {
+    let until: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let left = max(0, min(1, until.timeIntervalSince(timeline.date) / OpenchamberDroplet.autoRunLength))
+            Circle()
+                .trim(from: 0, to: left)
+                .stroke(Color.yellow, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// `auto 11:32`: a session let run, and for how much longer. A click ends it.
+struct AutoRunBadge: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+    let run: OpenchamberDroplet.AutoRun
+
+    var body: some View {
+        Button { droplet.endAutoRun(run) } label: {
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                Text(verbatim: "auto \(Formatting.elapsed(run.until.timeIntervalSince(timeline.date)))")
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.yellow)
+            }
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help("Approving everything until then. Click to ask again.")
     }
 }
 
@@ -233,7 +299,17 @@ struct OpenchamberWidget: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            WidgetHeader(status: status) { PageSwitch(droplet: droplet) }
+            WidgetHeader(status: status) {
+                if droplet.presenting {
+                    Button { droplet.setPresenting(false) } label: {
+                        Image(systemName: "eye.slash").font(.system(size: 10, weight: .semibold))
+                    }
+                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                    .help("Commands and messages are hidden. Click to show them.")
+                    .accessibilityLabel("Show commands and messages")
+                }
+                PageSwitch(droplet: droplet)
+            }
                 .padding(.bottom, DroppySpacing.smd)
             if droplet.connection == .noServers {
                 NoServersMessage(droplet: droplet)
@@ -398,6 +474,7 @@ private struct SessionHero: View {
     /// OpenChamber opens only from its button.
     var collapse: (() -> Void)? = nil
     @State private var showsDetail = false
+    @State private var dropTargeted = false
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
@@ -412,6 +489,9 @@ private struct SessionHero: View {
                     .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                     .lineLimit(1)
                 Spacer(minLength: DroppySpacing.md)
+                if let run = droplet.autoRuns[sessionID] {
+                    AutoRunBadge(droplet: droplet, run: run)
+                }
                 if !compact {
                     ElapsedText(since: activity.busySince, size: 13)
                     Button { droplet.focus(sessionID) } label: {
@@ -431,7 +511,8 @@ private struct SessionHero: View {
             // What it is doing and its last words: the part with more to read.
             VStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: DroppySpacing.sm) {
-                    NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13)
+                    NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13,
+                                  stuck: droplet.stuck[sessionID], hidesObject: droplet.presenting)
                     if !compact {
                         Spacer(minLength: DroppySpacing.md)
                         Text(session?.project ?? "")
@@ -445,7 +526,9 @@ private struct SessionHero: View {
 
                 Spacer(minLength: DroppySpacing.sm)
 
-                if !compact, lastTextLines > 0, let text = activity.liveText.flatMap({ $0.isEmpty ? nil : $0 }) ?? activity.lastText {
+                if !compact, lastTextLines > 0, droplet.presenting, activity.lastText != nil || activity.liveText != nil {
+                    HiddenWhilePresenting().padding(.bottom, DroppySpacing.sm)
+                } else if !compact, lastTextLines > 0, let text = activity.liveText.flatMap({ $0.isEmpty ? nil : $0 }) ?? activity.lastText {
                     AgentWords(text: text, live: activity.liveText?.isEmpty == false)
                         .font(.system(size: 12))
                         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
@@ -489,6 +572,30 @@ private struct SessionHero: View {
         .contentShape(Rectangle())
         .onTapGesture { if let collapse { collapse() } else { droplet.openSession(sessionID) } }
         .accessibilityAddTraits(.isButton)
+        .sessionDropTarget(droplet: droplet, sessionID: sessionID, isTargeted: $dropTargeted)
+    }
+}
+
+extension View {
+    /// Files dropped on a session go to it; the row lights up while they hover.
+    func sessionDropTarget(droplet: OpenchamberDroplet, sessionID: String, isTargeted: Binding<Bool>) -> some View {
+        background(
+            AdaptiveColors.notchSurfaceCardFill.opacity(isTargeted.wrappedValue ? 1 : 0),
+            in: RoundedRectangle(cornerRadius: DroppyRadius.small, style: .continuous)
+        )
+        .onDrop(of: [.fileURL], isTargeted: isTargeted) { providers in
+            Task { @MainActor in
+                var urls: [URL] = []
+                for provider in providers {
+                    let url = await withCheckedContinuation { (done: CheckedContinuation<URL?, Never>) in
+                        _ = provider.loadObject(ofClass: URL.self) { url, _ in done.resume(returning: url) }
+                    }
+                    if let url { urls.append(url) }
+                }
+                droplet.dropFiles(urls, on: sessionID)
+            }
+            return true
+        }
     }
 }
 
@@ -502,20 +609,24 @@ private struct SessionLine: View {
     /// Sessions running that have no row of their own on the page.
     var more = 0
     let tap: () -> Void
+    @State private var dropTargeted = false
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
         let activity = droplet.state.activity[sessionID] ?? SessionActivity()
+        let stuck = droplet.stuck[sessionID]
         let title = Text(session?.title ?? "Session")
             .font(.system(size: 13, weight: oneLine ? .medium : .semibold))
             .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+        let doing: String? = stuck.map { droplet.presenting ? $0.headline : $0.sentence }
+            ?? activity.narration.map { droplet.presenting ? $0.verb : $0.sentence }
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: DroppySpacing.sm) {
                 AgentMark(provider: session?.providerID ?? "", size: 16)
                 if oneLine {
-                    (title + Text(verbatim: activity.narration.map { "  " + $0.sentence } ?? "")
+                    (title + Text(verbatim: doing.map { "  " + $0 } ?? "")
                         .font(.system(size: 12))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText))
+                        .foregroundStyle(stuck == nil ? AdaptiveColors.notchSurfaceTertiaryText : Color.yellow))
                         .lineLimit(1)
                 } else {
                     title.lineLimit(1)
@@ -527,11 +638,14 @@ private struct SessionLine: View {
                         .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                         .fixedSize()
                 }
+                if let run = droplet.autoRuns[sessionID] {
+                    AutoRunBadge(droplet: droplet, run: run)
+                }
                 ElapsedText(since: activity.busySince, size: 12)
             }
             if !oneLine {
                 HStack(spacing: DroppySpacing.sm) {
-                    NarrationText(narration: activity.narration, failed: false, size: 12)
+                    NarrationText(narration: activity.narration, failed: false, size: 12, stuck: stuck, hidesObject: droplet.presenting)
                     Spacer(minLength: DroppySpacing.sm)
                     Text([droplet.serverLabel(forSession: sessionID), compact ? nil : session?.project].compactMap { $0 }.joined(separator: " · "))
                         .font(.system(size: 11))
@@ -544,6 +658,7 @@ private struct SessionLine: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: tap)
         .accessibilityAddTraits(.isButton)
+        .sessionDropTarget(droplet: droplet, sessionID: sessionID, isTargeted: $dropTargeted)
     }
 }
 
@@ -552,15 +667,21 @@ private struct NarrationText: View {
     let narration: Narration?
     let failed: Bool
     let size: CGFloat
+    /// Said in yellow instead, when the session looks stuck.
+    var stuck: OpenchamberDroplet.StuckReason? = nil
+    /// Presentation mode: the verb, not the command or the file.
+    var hidesObject = false
 
     var body: some View {
         Group {
             if failed {
                 Text("Failed").foregroundStyle(.red)
+            } else if let stuck {
+                Text(verbatim: hidesObject ? stuck.headline : stuck.sentence).fontWeight(.medium).foregroundStyle(.yellow)
             } else if let narration {
                 // The title above is the only white: the verb leads the line by weight alone.
                 Text(narration.verb).fontWeight(.medium).foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    + Text(verbatim: narration.object.map { " " + $0 } ?? "").foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    + Text(verbatim: hidesObject ? "" : narration.object.map { " " + $0 } ?? "").foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
             } else {
                 Text("Idle").foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
             }
@@ -685,6 +806,9 @@ private struct ApprovalView: View {
                         .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
                     Button("Always") { droplet.reply(to: permission, decision: "always") }
                         .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                    Button("Let it run 15m") { droplet.letRun(permission) }
+                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                        .help("Allow this, and everything it asks for the next 15 minutes")
                     Spacer(minLength: 0)
                     if droplet.state.pendingCount > 1 {
                         Text(verbatim: "+\(droplet.state.pendingCount - 1)")
@@ -704,10 +828,11 @@ private struct ApprovalView: View {
     /// **Run** `swift build`: the verb in the waiting orange, then what it acts on.
     private func request(_ command: String, size: CGFloat) -> Text {
         let verb = Formatting.permissionVerb(permission.action)
+        let shown = droplet.presenting && !command.isEmpty ? "hidden while presenting" : command
         return Text(verbatim: verb.prefix(1).uppercased() + verb.dropFirst())
             .font(.system(size: size + 0.5, weight: .semibold))
             .foregroundStyle(.orange)
-            + Text(verbatim: command.isEmpty ? "" : "  " + command)
+            + Text(verbatim: shown.isEmpty ? "" : "  " + shown)
             .font(.system(size: size, design: .monospaced))
             .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
     }
@@ -768,6 +893,10 @@ private struct TodayPage: View {
                 }
             }
             Spacer(minLength: DroppySpacing.sm)
+            if !context.isNarrow {
+                WeekStrip(days: droplet.days, today: today)
+                Spacer(minLength: DroppySpacing.sm)
+            }
             HStack(spacing: DroppySpacing.lg) {
                 ForEach(droplet.servers.prefix(context.isNarrow ? 2 : 4)) { server in
                     let state = droplet.serverStates[server.id]
@@ -800,6 +929,42 @@ private struct TodayPage: View {
         Text(verbatim: text)
             .font(.system(size: 11.5))
             .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+    }
+}
+
+/// The last seven days of agent time, a bar each, today in white.
+private struct WeekStrip: View {
+    let days: [String: OpenchamberDroplet.TodayStats]
+    let today: OpenchamberDroplet.TodayStats
+
+    var body: some View {
+        let now = Date()
+        let week = (0..<7).map { offset -> (label: String, seconds: TimeInterval, isToday: Bool) in
+            let date = Calendar.current.date(byAdding: .day, value: offset - 6, to: now) ?? now
+            let key = OpenchamberDroplet.TodayStats.key(for: date)
+            let seconds = offset == 6 ? today.seconds : days[key]?.seconds ?? 0
+            return (offset == 6 ? "Today" : date.formatted(.dateTime.weekday(.abbreviated)), seconds, offset == 6)
+        }
+        let longest = max(week.map(\.seconds).max() ?? 0, 1)
+        HStack(alignment: .bottom, spacing: DroppySpacing.md) {
+            ForEach(week.indices, id: \.self) { index in
+                let day = week[index]
+                VStack(spacing: 3) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(day.isToday ? AdaptiveColors.notchSurfacePrimaryText : AdaptiveColors.notchSurfacePrimaryText.opacity(0.22))
+                        .frame(width: 18, height: max(3, 22 * day.seconds / longest))
+                        .frame(height: 22, alignment: .bottom)
+                    Text(verbatim: day.label)
+                        .font(.system(size: 9.5, weight: day.isToday ? .semibold : .regular))
+                        .foregroundStyle(day.isToday ? AdaptiveColors.notchSurfacePrimaryText : AdaptiveColors.notchSurfaceTertiaryText)
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .help("\(day.label): \(Formatting.duration(day.seconds)) of agent time")
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("This week: \(Formatting.duration(week.map(\.seconds).reduce(0, +))) of agent time")
     }
 }
 
@@ -1179,6 +1344,9 @@ struct SessionFocus: View {
                 }
                 .lineLimit(1)
                 Spacer(minLength: DroppySpacing.md)
+                if let run = droplet.autoRuns[id] {
+                    AutoRunBadge(droplet: droplet, run: run)
+                }
                 ElapsedText(since: activity.busySince, size: 13)
                 if activity.isBusy {
                     Button("Stop") { droplet.interrupt(sessionID: id) }
@@ -1199,18 +1367,22 @@ struct SessionFocus: View {
             }
 
             HStack(alignment: .top, spacing: DroppySpacing.lg) {
-                StepList(calls: activity.calls, steps: activity.steps)
+                StepList(calls: activity.calls, steps: activity.steps, hidesObjects: droplet.presenting)
                     .frame(width: 190, alignment: .topLeading)
-                ScrollView {
-                    AgentWords(text: live ?? activity.lastText ?? "", live: live != nil, tail: nil)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                        .lineSpacing(2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
+                if droplet.presenting {
+                    HiddenWhilePresenting().frame(maxWidth: .infinity, alignment: .topLeading)
+                } else {
+                    ScrollView {
+                        AgentWords(text: live ?? activity.lastText ?? "", live: live != nil, tail: nil)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineSpacing(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    // Follow the words as they come; a finished message reads from the top.
+                    .defaultScrollAnchor(live == nil ? .top : .bottom)
                 }
-                // Follow the words as they come; a finished message reads from the top.
-                .defaultScrollAnchor(live == nil ? .top : .bottom)
             }
             .frame(maxHeight: .infinity, alignment: .top)
 
@@ -1223,11 +1395,26 @@ struct SessionFocus: View {
                             .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                     }
                     .fixedSize()
+                    if !activity.isBusy, activity.promptID != nil {
+                        Button { droplet.undoTurn(id) } label: {
+                            Image(systemName: "arrow.uturn.backward").font(.system(size: 9, weight: .semibold))
+                        }
+                        .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                        .help("Undo this turn")
+                        .accessibilityLabel("Undo this turn")
+                    }
                 }
                 if let share = droplet.contextShare(forSession: id) {
                     ContextMeter(share: share)
                 }
                 Spacer(minLength: DroppySpacing.sm)
+                // A finished turn takes a quick reply here; the rest is OpenChamber's.
+                if !activity.isBusy {
+                    ForEach(Array(droplet.quickReplies.prefix(2).enumerated()), id: \.offset) { _, text in
+                        Button(text) { droplet.send(text, to: id) }
+                            .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                    }
+                }
                 Button("Reply in OpenChamber") { droplet.openSession(id) }
                     .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
             }
@@ -1241,6 +1428,8 @@ struct SessionFocus: View {
 private struct StepList: View {
     let calls: [ToolCall]
     let steps: Int
+    /// Presentation mode: verbs, no commands or files.
+    var hidesObjects = false
 
     var body: some View {
         if calls.isEmpty {
@@ -1267,7 +1456,7 @@ private struct StepList: View {
                             .font(.system(size: 9, weight: .bold))
                             .frame(width: 12)
                             (Text(running ? narration.verb : narration.pastVerb).fontWeight(.medium)
-                                + Text(verbatim: narration.object.map { " " + $0 } ?? ""))
+                                + Text(verbatim: hidesObjects ? "" : narration.object.map { " " + $0 } ?? ""))
                                 .foregroundStyle(running ? AdaptiveColors.notchSurfacePrimaryText : AdaptiveColors.notchSurfaceSecondaryText)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -1509,7 +1698,11 @@ struct NoticeCard: View {
     var diff: TurnDiff? = nil
     let detail: String?
     let style: Style
+    /// Presentation mode: the command, message or error stays off the notch.
+    var hidesDetail = false
     var actions: [NoticeAction] = []
+    /// Set when the turn can be undone: a ↺ beside the ↗.
+    var onUndo: (@MainActor () -> Void)? = nil
     let onOpen: @MainActor () -> Void
 
     var body: some View {
@@ -1538,6 +1731,14 @@ struct NoticeCard: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: DroppySpacing.sm)
+                if let onUndo {
+                    Button(action: onUndo) {
+                        Image(systemName: "arrow.uturn.backward").font(.system(size: 9, weight: .semibold))
+                    }
+                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                    .help("Undo this turn")
+                    .accessibilityLabel("Undo this turn")
+                }
                 Button(action: onOpen) {
                     Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold))
                 }
@@ -1545,7 +1746,9 @@ struct NoticeCard: View {
                 .help("Open in OpenChamber")
                 .accessibilityLabel("Open in OpenChamber")
             }
-            if let detail {
+            if hidesDetail, detail != nil {
+                HiddenWhilePresenting()
+            } else if let detail {
                 // A command or an error is shown as is: its backticks and asterisks are its own.
                 Text(style == .code ? AttributedString(detail) : Formatting.inlineMarkdown(detail))
                     .font(style == .code ? .system(size: 11, design: .monospaced) : .system(size: 12))
@@ -1570,6 +1773,131 @@ struct NoticeCard: View {
             + Text(verbatim: "+\(diff.additions)").foregroundStyle(.green)
             + Text(verbatim: " −\(diff.deletions)").foregroundStyle(.red)
             + Text(verbatim: diff.files == 1 ? " in 1 file" : " in \(diff.files) files").foregroundStyle(tertiary)
+    }
+}
+
+/// Listening, in the strip: the session's mascot at the left edge, a red dot at the right.
+struct VoiceStrip: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+
+    var body: some View {
+        let provider = droplet.voiceSessionID.flatMap { droplet.state.sessions[$0]?.providerID } ?? ""
+        HStack(spacing: 0) {
+            if let mascot = AgentMascot.Kind(provider: provider) {
+                AgentMascot(kind: mascot, isAnimating: false)
+            } else {
+                ChamberGlyph(motion: .still)
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 4) {
+                Circle().fill(.red).frame(width: 7, height: 7)
+                Text("Listening").font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .semibold))
+            }
+            .foregroundStyle(.red)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+/// What you are saying, as it is heard, and where it goes.
+struct VoiceCard: View {
+    @ObservedObject var droplet: OpenchamberDroplet
+
+    var body: some View {
+        let id = droplet.voiceSessionID
+        let session = id.flatMap { droplet.state.sessions[$0] }
+        let heard: String = if case let .listening(_, text) = droplet.voice { text } else { "" }
+        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+            HStack(spacing: DroppySpacing.smd) {
+                AgentMark(provider: session?.providerID ?? "", size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(verbatim: "To \(session?.title ?? "a session")")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                    (Text("Listening").fontWeight(.semibold).foregroundStyle(.red)
+                        + Text(verbatim: " · press the shortcut again to send").foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText))
+                        .font(.system(size: 11))
+                }
+                .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            Text(verbatim: heard.isEmpty ? "Say what the session should do…" : Formatting.tail(heard, limit: 140))
+                .font(.system(size: 13))
+                .foregroundStyle(heard.isEmpty ? AdaptiveColors.notchSurfaceTertiaryText : AdaptiveColors.notchSurfacePrimaryText)
+                .lineLimit(2)
+            Spacer(minLength: 0)
+            NoticeActions(actions: [
+                NoticeAction(title: "Send", role: .accent) { droplet.sendVoice() },
+                NoticeAction(title: "Cancel", role: .quiet) { droplet.cancelVoice() },
+            ])
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+}
+
+/// Everything that happened while you were away, a row a session, and the
+/// one thing worth doing first.
+struct AwayCard: View {
+    let droplet: OpenchamberDroplet
+    let minutes: Int
+    let ended: [OpenchamberDroplet.AwayEntry]
+    let waiting: [String]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DroppySpacing.sm) {
+            HStack {
+                Text("While you were away")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                Spacer(minLength: DroppySpacing.sm)
+                Text(verbatim: Formatting.duration(TimeInterval(minutes * 60)))
+                    .font(.system(size: 11.5))
+                    .monospacedDigit()
+                    .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            }
+            VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
+                ForEach(waiting.prefix(4), id: \.self) { id in
+                    row(symbol: "hand.raised.fill", tint: .orange, title: droplet.state.sessions[id]?.title ?? "A session",
+                        line: droplet.state.permissions.first { $0.sessionID == id }
+                            .map { "waits to \(Formatting.permissionVerb($0.action))" } ?? "has a question", diff: nil)
+                }
+                ForEach(ended.prefix(max(0, 4 - waiting.count)), id: \.sessionID) { entry in
+                    row(symbol: entry.failed ? "xmark" : "checkmark", tint: entry.failed ? .red : .green, title: entry.title,
+                        line: droplet.presenting ? nil : entry.headline, diff: entry.diff)
+                }
+            }
+            Spacer(minLength: 0)
+            NoticeActions(actions: [
+                waiting.first.map { id in NoticeAction(title: "Review the request", role: .accent) { droplet.openSession(id) } }
+                    ?? NoticeAction(title: "Open the last one", role: .quiet) { if let id = ended.last?.sessionID { droplet.openSession(id) } },
+            ])
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func row(symbol: String, tint: Color, title: String, line: String?, diff: TurnDiff?) -> some View {
+        HStack(spacing: DroppySpacing.sm) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(tint)
+                .frame(width: 14)
+            (Text(verbatim: title).fontWeight(.semibold).foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                + Text(verbatim: line.map { " — \($0)" } ?? "").foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText))
+                .font(.system(size: 12))
+                .lineLimit(1)
+            Spacer(minLength: DroppySpacing.sm)
+            if let diff, !diff.isEmpty { DiffText(diff: diff, size: 11).fixedSize() }
+        }
+    }
+}
+
+/// What stands in for a command or a message in presentation mode.
+struct HiddenWhilePresenting: View {
+    var body: some View {
+        Label("Hidden while presenting", systemImage: "eye.slash")
+            .font(.system(size: 12))
+            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            .lineLimit(1)
     }
 }
 
@@ -1706,7 +2034,7 @@ struct OpenchamberSettings: View {
                     )
                     DropletToggleRow(
                         title: "A session asks a question",
-                        subtitle: "Answered in OpenChamber.",
+                        subtitle: "A pick from a short list is answered on the card, anything else in OpenChamber.",
                         isOn: preference("questionCards", value: droplet.showsQuestionCards)
                     )
                     DropletToggleRow(
@@ -1719,6 +2047,105 @@ struct OpenchamberSettings: View {
                         subtitle: "The error OpenCode reported.",
                         isOn: preference("failureCards", value: droplet.showsFailureCards)
                     )
+                    DropletToggleRow(
+                        title: "A session looks stuck",
+                        subtitle: "Five minutes without a sound, one command running ten, or the same call failing three times. Stop it from the card, or let it be.",
+                        isOn: preference("stuckCards", value: droplet.showsStuckCards)
+                    )
+                }
+            }
+
+            DropletSettingsSection {
+                settingsSectionHeader("Quick replies")
+            } content: {
+                DropletSettingsCard {
+                    ForEach(0..<3, id: \.self) { index in
+                        DropletControlRow(
+                            title: ["First", "Second", "Third"][index],
+                            infoTip: index == 0 ? "Buttons on a finished or failed turn's card, sent to the session as they read. The first is the accented one; leave one empty to drop it." : nil
+                        ) {
+                            TextField("", text: quickReply(index), prompt: Text(OpenchamberDroplet.defaultQuickReplies[index]))
+                                .frame(maxWidth: 220)
+                        }
+                    }
+                }
+            }
+
+            DropletSettingsSection {
+                settingsSectionHeader("Voice")
+            } content: {
+                DropletSettingsCard {
+                    DropletControlRow(
+                        title: "Talk to a session",
+                        infoTip: "Bind “Talk to the OpenChamber session that needs you” under Droppy's Shortcuts. Press it, say what the session should do, press it again to send. It goes to the session open over the shelf, else the one that needs you, else the one that finished last. Speech is recognized on this Mac when it can be."
+                    ) {
+                        if droplet.voiceIsReady {
+                            Text("Ready").foregroundStyle(.secondary)
+                        } else {
+                            Button("Allow microphone") { Task { await droplet.requestVoicePermissions() } }
+                                .buttonStyle(.bordered)
+                        }
+                    }
+                }
+            }
+
+            DropletSettingsSection {
+                settingsSectionHeader("When you come back")
+            } content: {
+                DropletSettingsCard {
+                    DropletToggleRow(
+                        title: "Sum up what happened while you were away",
+                        subtitle: "After the screen locks or sleeps, or ten minutes without input: one card with what finished and what waits on you.",
+                        isOn: preference("awayRecap", value: droplet.recapsAway)
+                    )
+                    DropletToggleRow(
+                        title: "Write each turn's headline with the server's small model",
+                        subtitle: "Eight words from the model OpenCode uses for titles. Off, the headline is the first sentence of the message.",
+                        isOn: preference("awayHeadlines", value: droplet.writesHeadlines)
+                    )
+                }
+            }
+
+            DropletSettingsSection {
+                settingsSectionHeader("Privacy")
+            } content: {
+                DropletSettingsCard {
+                    DropletToggleRow(
+                        title: "Offer to send errors I copy",
+                        subtitle: "When what you copy reads like a stack trace or a compiler error, a card offers it to the session it most likely belongs to. Nothing is sent until you press Send, and nothing is kept.",
+                        isOn: Binding(get: { droplet.offersCopiedErrors }, set: { droplet.setOffersCopiedErrors($0) })
+                    )
+                    DropletToggleRow(
+                        title: "Hide commands and messages",
+                        subtitle: "For screen sharing: the notch keeps titles and states but not what agents run or say. A shortcut toggles it too.",
+                        isOn: Binding(get: { droplet.presenting }, set: { droplet.setPresenting($0) })
+                    )
+                }
+            }
+
+            DropletSettingsSection {
+                settingsSectionHeader("Links")
+            } content: {
+                DropletSettingsCard {
+                    DropletControlRow(
+                        title: "Token",
+                        infoTip: "droppy://droplet/openchamber/new?project=…&prompt=…, reply?text=…, approve, stop, voice, open and focus, for Raycast, Shortcuts or a script. Any web page can open these links, so all but open and focus need token=."
+                    ) {
+                        HStack(spacing: DroppySpacing.sm) {
+                            Text(verbatim: droplet.linkToken)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                            Button("Copy example") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(
+                                    "open \"droppy://droplet/openchamber/new?project=api&prompt=bump%20the%20deps&token=\(droplet.linkToken)\"",
+                                    forType: .string
+                                )
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                 }
             }
 
@@ -1734,6 +2161,23 @@ struct OpenchamberSettings: View {
                 }
             }
         }
+    }
+
+    private func quickReply(_ index: Int) -> Binding<String> {
+        Binding(
+            get: {
+                let stored = droplet.host?.preferences.value(forKey: "quickReplies", default: OpenchamberDroplet.defaultQuickReplies)
+                    ?? OpenchamberDroplet.defaultQuickReplies
+                return stored.indices.contains(index) ? stored[index] : ""
+            },
+            set: { text in
+                var stored = droplet.host?.preferences.value(forKey: "quickReplies", default: OpenchamberDroplet.defaultQuickReplies)
+                    ?? OpenchamberDroplet.defaultQuickReplies
+                while stored.count < 3 { stored.append("") }
+                stored[index] = text
+                droplet.setPreference(stored, forKey: "quickReplies")
+            }
+        )
     }
 
     /// How the server is reached, and why the last attempt failed, behind the row's (i).

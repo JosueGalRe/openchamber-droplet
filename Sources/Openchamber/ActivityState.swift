@@ -70,6 +70,17 @@ struct SessionActivity: Equatable, Sendable {
     /// The call the session is in, if it is in one.
     var currentCall: ToolCall? { calls.last(where: { $0.mark == .running }) ?? (isBusy ? calls.last : nil) }
 
+    /// The command or file this turn keeps failing on, and how often: the same
+    /// call failing three times or more, and failing still on its latest try.
+    var repeatedFailure: (call: Narration, failures: Int)? {
+        let finished = calls.filter { $0.mark != .running }
+        guard let last = finished.last(where: { $0.mark == .failed }) else { return nil }
+        let same = finished.filter { $0.name == last.name && $0.target == last.target }
+        let failures = same.filter { $0.mark == .failed }.count
+        guard failures >= 3, same.last?.mark == .failed else { return nil }
+        return (Narration(call: last), failures)
+    }
+
     /// What the session is doing, in words, while it is busy.
     var narration: Narration? {
         if let running = calls.last(where: { $0.mark == .running }) { return Narration(call: running) }
@@ -216,6 +227,9 @@ enum ActivityEvent: Equatable, Sendable {
     /// The user's message reached the session: the turn it starts is measured from it.
     case promptDelivered(sessionID: String, messageID: String)
     case branchChanged(directory: String, branch: String?)
+    /// Any other event about the session, reasoning deltas included: proof
+    /// it is alive, which is all a stuck check needs. The reducer ignores it.
+    case heard(sessionID: String)
     /// `session.created`, `session.renamed`, `session.agent.selected` and
     /// `session.model.selected`: whatever changed, nil for what did not.
     case sessionChanged(SessionChange)
@@ -227,6 +241,24 @@ enum ActivityEvent: Equatable, Sendable {
     /// session whose execution events were missed while disconnected.
     case statusChanged(sessionID: String, busy: Bool, at: Date)
     case sessionDeleted(String)
+}
+
+extension ActivityEvent {
+    /// The session the event is about, when it is about one.
+    var sessionID: String? {
+        switch self {
+        case let .executionStarted(id, _), let .executionEnded(id, _, _, _), let .retryScheduled(id, _, _, _),
+             let .toolStarted(id, _, _), let .toolCalled(id, _, _, _), let .toolFinished(id, _, _),
+             let .textEnded(id, _), let .textStarted(id), let .textStreamed(id, _), let .stepEnded(id, _),
+             let .compaction(id, _), let .promptDelivered(id, _), let .permissionSettled(id, _),
+             let .formSettled(id, _), let .statusChanged(id, _, _), let .sessionDeleted(id), let .heard(id):
+            return id
+        case let .permissionAsked(permission): return permission.sessionID
+        case let .formCreated(form): return form.sessionID
+        case let .sessionChanged(change): return change.sessionID
+        case .seeded, .sessionsListed, .branchChanged: return nil
+        }
+    }
 }
 
 struct SessionChange: Equatable, Sendable {
@@ -427,6 +459,9 @@ struct ActivityState: Equatable, Sendable {
         case let .branchChanged(directory, branch):
             branches[directory] = branch
 
+        case .heard:
+            break
+
         case let .permissionAsked(permission):
             guard !permissions.contains(where: { $0.id == permission.id }) else { return }
             permissions.append(permission)
@@ -569,7 +604,7 @@ enum ActivityWire {
         case "session.deleted":
             return sessionID.map(ActivityEvent.sessionDeleted)
         default:
-            return nil
+            return sessionID.map(ActivityEvent.heard)
         }
     }
 

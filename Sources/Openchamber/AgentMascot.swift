@@ -22,17 +22,29 @@ struct AgentMascot: View {
         }
     }
 
+    /// How the session is doing, which is how the mascot moves.
+    enum Mood {
+        /// Its own loop: scuttling, breathing, typing.
+        case working
+        /// Holds still: it waits on you, and anything moving reads as working.
+        case still
+        /// Hops: the turn is done.
+        case done
+        /// Slumps, dimmed: the turn failed.
+        case failed
+    }
+
     let kind: Kind
     var size: CGFloat = DroppyLiveActivityMetrics.iconSize
-    /// False while nobody can see it, or while the session waits on you:
-    /// the clock stops and the mascot holds its first frame.
+    /// False while nobody can see it: the clock stops and the mascot holds a frame.
     var isAnimating = true
+    var mood: Mood = .working
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
-            if isAnimating && !reduceMotion {
+            if isAnimating && !reduceMotion && (mood == .working || mood == .done) {
                 // Discrete steps, as ChamberGlyph: the mascot runs in Droppy's process.
                 TimelineView(.periodic(from: .now, by: 1.0 / 12.0)) { timeline in
                     canvas(at: timeline.date.timeIntervalSinceReferenceDate)
@@ -42,12 +54,23 @@ struct AgentMascot: View {
             }
         }
         .frame(width: size, height: size)
+        .rotationEffect(.degrees(mood == .failed ? -12 : 0))
+        .opacity(mood == .failed ? 0.55 : 1)
         .accessibilityHidden(true)
     }
 
     private func canvas(at time: TimeInterval) -> some View {
         Canvas { context, canvasSize in
             context.scaleBy(x: canvasSize.width / 24, y: canvasSize.height / 24)
+            var time = time
+            switch mood {
+            case .working: break
+            case .still, .failed: time = 0
+            case .done:
+                // Two quick hops a second, on the figure's resting frame.
+                context.translateBy(x: 0, y: -2.4 * abs(sin(.pi * time / 0.5)))
+                time = 0
+            }
             switch kind {
             case .claude: Self.drawCrab(in: &context, at: time)
             case .codex: Self.drawCloud(in: &context, at: time)
