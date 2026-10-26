@@ -139,6 +139,10 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// Words streamed since the last flush, per server and session: a delta
     /// comes per token, and the notch redraws four times a second at most.
     private var pendingText: [String: [String: String]] = [:]
+    /// The same for the agent's thinking.
+    private var pendingReasoning: [String: [String: String]] = [:]
+    /// Sessions whose prompt was asked for, so a hover asks once.
+    private var promptLookups: Set<String> = []
     private var textFlush: Task<Void, Never>?
     private var focusPresentation: ExpandedSurfacePresentation?
     /// When each session last sent anything, and last moved a step on. Kept
@@ -324,6 +328,8 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         textFlush?.cancel()
         textFlush = nil
         pendingText = [:]
+        pendingReasoning = [:]
+        promptLookups = []
         feeds = [:]
         usageRefreshes = [:]
         clients = [:]
@@ -496,6 +502,12 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             pendingText[serverID, default: [:]][id, default: ""] += delta
             scheduleTextFlush()
             return
+        case let .reasoningStreamed(id, delta):
+            pendingReasoning[serverID, default: [:]][id, default: ""] += delta
+            scheduleTextFlush()
+            return
+        case let .reasoningStarted(id), let .reasoningEnded(id, _):
+            pendingReasoning[serverID]?[id] = nil
         case let .textStarted(id), let .textEnded(id, _), let .executionEnded(id, _, _, _):
             // The block these words belonged to is over; the event says the rest.
             pendingText[serverID]?[id] = nil
@@ -550,9 +562,14 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
             guard let self, !Task.isCancelled else { return }
             textFlush = nil
             let pending = pendingText
+            let thinking = pendingReasoning
             pendingText = [:]
+            pendingReasoning = [:]
             for (serverID, sessions) in pending {
                 for (id, delta) in sessions { serverStates[serverID]?.activity.apply(.textStreamed(sessionID: id, delta: delta)) }
+            }
+            for (serverID, sessions) in thinking {
+                for (id, delta) in sessions { serverStates[serverID]?.activity.apply(.reasoningStreamed(sessionID: id, delta: delta)) }
             }
             publish()
         }
@@ -599,6 +616,31 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     func contextShare(forSession id: String) -> Double? {
         guard let tokens = state.activity[id]?.contextTokens else { return nil }
         return catalogModel(forSession: id)?.contextShare(of: tokens)
+    }
+
+    /// The model's context window in tokens, when its catalog says.
+    func contextWindow(forSession id: String) -> Int? {
+        catalogModel(forSession: id).flatMap { $0.context > 0 ? $0.context : nil }
+    }
+
+    /// The prompt of a turn that began before the droplet was listening,
+    /// asked of the server once. Applied around `apply`: the answer is not
+    /// the session speaking, and must not reset its stuck clock.
+    func lookUpPrompt(forSession id: String) {
+        guard state.activity[id]?.prompt == nil, !promptLookups.contains(id),
+              let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
+        promptLookups.insert(id)
+        let directory = state.sessions[id]?.directory
+        Task {
+            do {
+                guard let (messageID, text) = try await client.lastPrompt(sessionID: id, directory: directory),
+                      serverStates[serverID]?.activity.activity[id]?.prompt == nil else { return }
+                serverStates[serverID]?.activity.apply(.promptDelivered(sessionID: id, messageID: messageID, text: text))
+                publish()
+            } catch {
+                promptLookups.remove(id)
+            }
+        }
     }
 
     /// The server's name, when there is more than one server to tell apart.
@@ -1744,6 +1786,8 @@ private extension OpenchamberDroplet {
             SessionInfo(id: "s2", title: "Design the droplet", directory: "/Users/me/projects/openchamber-droplet", parentID: nil, providerID: "anthropic"),
         ]))
         local.activity.apply(.executionStarted(sessionID: "s1", at: now.addingTimeInterval(-252)))
+        local.activity.apply(.promptDelivered(sessionID: "s1", messageID: "m1",
+                                              text: "A renamed session keeps its old title in notifications. Fix the cache and add a test."))
         for (index, (name, target, mark)) in [("read", "title-cache.js", true), ("grep", "notificationTitle", true), ("bash", "pnpm test", false),
                                                ("read", "session-runtime.js", true), ("bash", "pnpm test", true)].enumerated() {
             local.activity.apply(.toolStarted(sessionID: "s1", callID: "c\(index)", name: name))

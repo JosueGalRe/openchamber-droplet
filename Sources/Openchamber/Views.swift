@@ -105,6 +105,22 @@ enum Formatting {
         return first.count > limit ? String(first.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…" : first
     }
 
+    /// A path inside the session's project without the project's folder, and
+    /// `~` for the home folder; anything else as it is.
+    static func shortPath(_ text: String, in directory: String?) -> String {
+        if let directory, !directory.isEmpty, text.hasPrefix(directory + "/") { return String(text.dropFirst(directory.count + 1)) }
+        let home = NSHomeDirectory()
+        return text.hasPrefix(home + "/") ? "~" + text.dropFirst(home.count) : text
+    }
+
+    /// `870k`, `1M`, `1.5M`: a token count at a glance.
+    static func tokens(_ count: Int) -> String {
+        let thousands = Int((Double(count) / 1_000).rounded())
+        if thousands < 1_000 { return count < 1_000 ? "\(count)" : "\(thousands)k" }
+        let millions = (Double(count) / 100_000).rounded() / 10
+        return millions == millions.rounded() ? "\(Int(millions))M" : "\(millions)M"
+    }
+
     /// The end of text still being written, where the new words are.
     static func tail(_ text: String, limit: Int = 160) -> String {
         guard text.count > limit else { return text }
@@ -475,6 +491,9 @@ private struct SessionHero: View {
     var collapse: (() -> Void)? = nil
     @State private var showsDetail = false
     @State private var dropTargeted = false
+    /// The last words' height as the row shows them and as they would be whole.
+    @State private var shownWordsHeight: CGFloat = 0
+    @State private var wholeWordsHeight: CGFloat = 0
 
     var body: some View {
         let session = droplet.state.sessions[sessionID]
@@ -508,65 +527,78 @@ private struct SessionHero: View {
                 .help("Open in OpenChamber")
                 .accessibilityLabel("Open in OpenChamber")
             }
-            // What it is doing and its last words: the part with more to read.
+            // What it is doing, its last words and the run of steps: the part
+            // with more to read, so the card hangs under all of it and never
+            // over the model's row.
             VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: DroppySpacing.sm) {
+                        NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13,
+                                      stuck: droplet.stuck[sessionID], hidesObject: droplet.presenting)
+                        if !compact {
+                            Spacer(minLength: DroppySpacing.md)
+                            Text(session?.project ?? "")
+                                .font(.system(size: 12))
+                                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                                .lineLimit(1)
+                        }
+                    }
+                    .padding(.leading, compact ? 0 : 28)
+                    .padding(.top, DroppySpacing.xs)
+
+                    Spacer(minLength: DroppySpacing.sm)
+
+                    if !compact, lastTextLines > 0, droplet.presenting, activity.lastText != nil || activity.liveText != nil {
+                        HiddenWhilePresenting().padding(.bottom, DroppySpacing.sm)
+                    } else if !compact, lastTextLines > 0, let text = activity.liveText.flatMap({ $0.isEmpty ? nil : $0 }) ?? activity.lastText {
+                        AgentWords(text: text, live: activity.liveText?.isEmpty == false)
+                            .font(.system(size: 12))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineLimit(lastTextLines)
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { shownWordsHeight = $0 }
+                            .background(alignment: .topLeading) {
+                                // The same words unlimited and unseen: taller means the row cuts them.
+                                AgentWords(text: text, live: false)
+                                    .font(.system(size: 12))
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .hidden()
+                                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { wholeWordsHeight = $0 }
+                            }
+                            .padding(.leading, DroppySpacing.sm)
+                            .overlay(alignment: .leading) {
+                                Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
+                            }
+                            .padding(.bottom, DroppySpacing.sm)
+                    }
+                }
                 HStack(spacing: DroppySpacing.sm) {
-                    NarrationText(narration: failed ? nil : activity.narration, failed: failed, size: compact ? 12 : 13,
-                                  stuck: droplet.stuck[sessionID], hidesObject: droplet.presenting)
-                    if !compact {
-                        Spacer(minLength: DroppySpacing.md)
-                        Text(session?.project ?? "")
+                    CallStrip(calls: Array(activity.calls.suffix(compact ? 8 : 12)))
+                    // The strip shows the steps; the count only says what it has no room for.
+                    if !compact, activity.steps > activity.calls.suffix(12).count {
+                        Text(verbatim: "\(activity.steps) steps")
+                            .font(.system(size: 12))
+                            .monospacedDigit()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                    }
+                    if !compact, let share = droplet.contextShare(forSession: sessionID) {
+                        ContextMeter(share: share)
+                    }
+                    Spacer(minLength: DroppySpacing.sm)
+                    if compact {
+                        ElapsedText(since: activity.busySince, size: 13)
+                    } else {
+                        Text(Formatting.runner(of: session, model: droplet.modelName(forSession: sessionID), server: droplet.serverLabel(forSession: sessionID)))
                             .font(.system(size: 12))
                             .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                             .lineLimit(1)
+                            .truncationMode(.head)
                     }
-                }
-                .padding(.leading, compact ? 0 : 28)
-                .padding(.top, DroppySpacing.xs)
-
-                Spacer(minLength: DroppySpacing.sm)
-
-                if !compact, lastTextLines > 0, droplet.presenting, activity.lastText != nil || activity.liveText != nil {
-                    HiddenWhilePresenting().padding(.bottom, DroppySpacing.sm)
-                } else if !compact, lastTextLines > 0, let text = activity.liveText.flatMap({ $0.isEmpty ? nil : $0 }) ?? activity.lastText {
-                    AgentWords(text: text, live: activity.liveText?.isEmpty == false)
-                        .font(.system(size: 12))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                        .lineLimit(lastTextLines)
-                        .padding(.leading, DroppySpacing.sm)
-                        .overlay(alignment: .leading) {
-                            Capsule().fill(AdaptiveColors.notchSurfacePrimaryText.opacity(0.14)).frame(width: 2)
-                        }
-                        .padding(.bottom, DroppySpacing.sm)
                 }
             }
             .contentShape(Rectangle())
             .hoverCard(droplet: droplet, isPresented: $showsDetail) {
-                SessionDetail(droplet: droplet, sessionID: sessionID)
-            }
-
-            HStack(spacing: DroppySpacing.sm) {
-                CallStrip(calls: Array(activity.calls.suffix(compact ? 8 : 12)))
-                // The strip shows the steps; the count only says what it has no room for.
-                if !compact, activity.steps > activity.calls.suffix(12).count {
-                    Text(verbatim: "\(activity.steps) steps")
-                        .font(.system(size: 12))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                }
-                if !compact, let share = droplet.contextShare(forSession: sessionID) {
-                    ContextMeter(share: share)
-                }
-                Spacer(minLength: DroppySpacing.sm)
-                if compact {
-                    ElapsedText(since: activity.busySince, size: 13)
-                } else {
-                    Text(Formatting.runner(of: session, model: droplet.modelName(forSession: sessionID), server: droplet.serverLabel(forSession: sessionID)))
-                        .font(.system(size: 12))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                        .lineLimit(1)
-                        .truncationMode(.head)
-                }
+                SessionDetail(droplet: droplet, sessionID: sessionID,
+                              showsLastText: compact || lastTextLines == 0 || wholeWordsHeight > shownWordsHeight + 1)
             }
         }
         .contentShape(Rectangle())
@@ -732,6 +764,9 @@ struct AgentWords: View {
 /// How full the model's context window is: a short bar and the share, orange from 80%.
 struct ContextMeter: View {
     let share: Double
+    /// Said instead of the share, as `870k of 1M tokens`.
+    var label: String? = nil
+    var size: CGFloat = 12
 
     var body: some View {
         let full = share >= 0.8
@@ -742,8 +777,8 @@ struct ContextMeter: View {
                 .overlay(alignment: .leading) {
                     Capsule().fill(full ? Color.orange : AdaptiveColors.notchSurfaceSecondaryText).frame(width: max(4, 24 * share), height: 4)
                 }
-            Text(verbatim: "\(Int((share * 100).rounded()))% context")
-                .font(.system(size: 12))
+            Text(verbatim: label ?? "\(Int((share * 100).rounded()))% context")
+                .font(.system(size: size))
                 .monospacedDigit()
                 .foregroundStyle(full ? Color.orange : AdaptiveColors.notchSurfaceTertiaryText)
         }
@@ -1208,7 +1243,8 @@ struct PaceMark: View {
 /// beat after the pointer arrives, so sweeping across opens nothing, and
 /// closes a beat after it leaves both, so crossing the gap keeps it open.
 /// The shelf stays open while it shows, or leaving the shelf for the card
-/// would close the shelf under it.
+/// would close the shelf under it. It is the notch's black, arrow and all:
+/// the system's glass let whatever was behind the shelf show through.
 private struct HoverCard<Card: View>: ViewModifier {
     let droplet: OpenchamberDroplet
     @Binding var isPresented: Bool
@@ -1221,7 +1257,10 @@ private struct HoverCard<Card: View>: ViewModifier {
         content
             .onHover { overAnchor = $0; hoverChanged() }
             .popover(isPresented: $isPresented, arrowEdge: .bottom) {
-                card().onHover { overCard = $0; hoverChanged() }
+                card()
+                    .environment(\.colorScheme, .dark)
+                    .presentationBackground(Color.black)
+                    .onHover { overCard = $0; hoverChanged() }
             }
             .onChange(of: isPresented) { _, shown in droplet.holdShelfOpen(shown) }
             // Gone with the card up: nothing else would let go of the shelf.
@@ -1249,53 +1288,108 @@ extension View {
     }
 }
 
-/// More of a session than the shelf has room for: the whole command or path
-/// of the call it is in and its last words, each capped so the card stays a
-/// glance, not a transcript.
+/// More of a session than the shelf has room for, without repeating its row:
+/// what you asked, what it is on now (the whole command, its thinking or the
+/// words it is writing), what it said last, and how far the turn and its
+/// context have gone. Each block is capped so the card stays a glance.
 private struct SessionDetail: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let sessionID: String
+    /// False when the row already shows the last message whole.
+    var showsLastText = true
 
     var body: some View {
-        let session = droplet.state.sessions[sessionID]
         let activity = droplet.state.activity[sessionID] ?? SessionActivity()
-        let running = activity.calls.last { $0.mark == .running }
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(session?.title ?? "Session").font(.system(size: 15, weight: .semibold)).lineLimit(2)
-                Text([Formatting.runner(of: session, model: droplet.modelName(forSession: sessionID), server: droplet.serverLabel(forSession: sessionID)), session?.project]
-                    .compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            if let running {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(Narration(call: running).verb).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
-                    if let target = running.target {
-                        Text(target)
-                            .font(.system(size: 12, design: .monospaced))
-                            .lineLimit(6)
-                            .fixedSize(horizontal: false, vertical: true)
+        let prompt = activity.prompt?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let directory = droplet.state.sessions[sessionID]?.directory
+        let command = activity.calls.last { $0.mark == .running }.flatMap { call in
+            (call.detail ?? call.target).map { (Narration(call: call).verb, Formatting.shortPath($0, in: directory)) }
+        }
+        let writing = activity.liveText?.nilIfEmpty
+        let thinking = activity.reasoning?.nilIfEmpty
+        let last = writing == nil && showsLastText ? activity.lastText : nil
+        VStack(alignment: .leading, spacing: 11) {
+            if droplet.presenting {
+                HiddenWhilePresenting()
+            } else {
+                if let prompt {
+                    block("You asked") {
+                        Text(verbatim: String(prompt.prefix(600))).lineLimit(3)
                     }
                 }
+                if let command {
+                    block(command.0) {
+                        Text(verbatim: command.1).font(.system(size: 12, design: .monospaced)).lineLimit(6)
+                    }
+                } else if let writing {
+                    block("Writing") {
+                        AgentWords(text: writing, live: true, tail: 240).lineLimit(6)
+                    }
+                } else if let thinking {
+                    block("Thinking") {
+                        Text(Formatting.inlineMarkdown(Formatting.tail(thinking, limit: 240))).italic().lineLimit(6)
+                    }
+                }
+                if let last {
+                    block("Last message") {
+                        Text(Formatting.inlineMarkdown(last)).lineLimit(5)
+                    }
+                }
+                if prompt == nil, command == nil, writing == nil, thinking == nil, last == nil {
+                    Text(verbatim: activity.narration?.sentence ?? "Nothing to show yet")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                }
             }
-            if let text = activity.lastText {
-                Text(Formatting.inlineMarkdown(text))
-                    .font(.system(size: 13))
-                    .lineLimit(10)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if activity.steps > 0 {
-                Text(verbatim: activity.steps == 1 ? "1 step this turn" : "\(activity.steps) steps this turn")
-                    .font(.system(size: 12))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
+            footer(activity)
         }
         .padding(16)
         .frame(width: 340, alignment: .leading)
+        .onAppear { droplet.lookUpPrompt(forSession: sessionID) }
     }
+
+    private func block<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(verbatim: label)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            content()
+                .font(.system(size: 12.5))
+                .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// `12 steps · ▬ 870k of 1M tokens   compacts soon`.
+    @ViewBuilder
+    private func footer(_ activity: SessionActivity) -> some View {
+        let window = droplet.contextWindow(forSession: sessionID)
+        let share = droplet.contextShare(forSession: sessionID)
+        if activity.steps > 0 || share != nil {
+            HStack(spacing: DroppySpacing.sm) {
+                if activity.steps > 0 {
+                    Text(verbatim: activity.steps == 1 ? "1 step" : "\(activity.steps) steps")
+                }
+                if let tokens = activity.contextTokens, let window, let share {
+                    if activity.steps > 0 { Text(verbatim: "·") }
+                    ContextMeter(share: share, label: "\(Formatting.tokens(tokens)) of \(Formatting.tokens(window)) tokens", size: 11.5)
+                    Spacer(minLength: DroppySpacing.sm)
+                    // OpenCode compacts the context once it overflows.
+                    if share >= 0.8 {
+                        Text("Compacts soon").foregroundStyle(.orange)
+                    }
+                }
+            }
+            .font(.system(size: 11.5))
+            .monospacedDigit()
+            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+            .lineLimit(1)
+        }
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 // MARK: - Expanded surface

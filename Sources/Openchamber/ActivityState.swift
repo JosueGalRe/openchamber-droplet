@@ -38,6 +38,8 @@ struct ToolCall: Equatable, Sendable {
     /// What the call acts on: a file name, a command, a host.
     var target: String?
     var mark: ToolMark
+    /// The same in full, for the hover card: the path, every line of the command, the URL.
+    var detail: String? = nil
 }
 
 struct Retry: Equatable, Sendable {
@@ -65,6 +67,13 @@ struct SessionActivity: Equatable, Sendable {
     var compacting = false
     /// The user message the turn answers, which the turn's diff is measured from.
     var promptID: String?
+    /// What that message asked, when it was heard or looked up.
+    var prompt: String?
+    /// Messages queued for the session and not delivered yet, by id.
+    var queuedPrompts: [String: String] = [:]
+    /// The agent's thinking since its latest call or words began, as far as
+    /// it got; nil when it has not thought since.
+    var reasoning: String?
 
     var isBusy: Bool { busySince != nil }
     /// The call the session is in, if it is in one.
@@ -123,7 +132,7 @@ struct Narration: Equatable, Sendable {
         case "read", "view", "cat": self.init(verb: "Reading", object: call.target)
         case "edit", "multiedit", "patch", "apply_patch", "str_replace": self.init(verb: "Editing", object: call.target)
         case "write", "create": self.init(verb: "Writing", object: call.target)
-        case "bash", "shell", "exec", "run", "terminal": self.init(verb: "Running", object: call.target.flatMap(Self.command))
+        case "bash", "shell", "exec", "run", "terminal": self.init(verb: "Running", object: (call.detail ?? call.target).flatMap(Self.command))
         case "grep", "glob", "search", "find", "codesearch": self.init(verb: "Searching", object: call.target)
         case "list", "ls": self.init(verb: "Listing", object: call.target)
         case "webfetch", "fetch": self.init(verb: "Fetching", object: call.target)
@@ -135,15 +144,15 @@ struct Narration: Equatable, Sendable {
     }
 
     /// `swift test` out of `cd ~/x && swift test 2>&1 | tail`: the first part
-    /// that is not setup, as its program and subcommand, without flags,
-    /// redirections, pipes or heredocs.
+    /// that is not setup or a message, as its program and subcommand, without
+    /// flags, redirections, pipes or heredocs. Lines count as parts.
     static func command(_ line: String) -> String? {
-        let setup: Set = ["cd", "export", "source", ".", "set", "pushd", "env", "time", "sudo",
+        let setup: Set = ["cd", "export", "source", ".", "set", "pushd", "env", "time", "sudo", "echo", "printf",
                           "for", "case", "select", "done", "fi", "esac", "true", "false", ":", "[", "[["]
         // `for i in …; do swift test; done`: the words that open a block are not the command.
         let keywords: Set = ["do", "then", "else", "elif", "if", "while", "until", "!", "{"]
         let parts = line
-            .components(separatedBy: ";")
+            .components(separatedBy: CharacterSet(charactersIn: ";\n"))
             .flatMap { $0.components(separatedBy: "&&") }
             .flatMap { $0.components(separatedBy: "||") }
         for part in parts {
@@ -215,7 +224,7 @@ enum ActivityEvent: Equatable, Sendable {
     case executionEnded(sessionID: String, outcome: ExecutionOutcome, at: Date, error: String? = nil)
     case retryScheduled(sessionID: String, attempt: Int, at: Date, scheduled: Date)
     case toolStarted(sessionID: String, callID: String, name: String)
-    case toolCalled(sessionID: String, callID: String, name: String?, target: String?)
+    case toolCalled(sessionID: String, callID: String, name: String?, target: String?, detail: String? = nil)
     case toolFinished(sessionID: String, callID: String, succeeded: Bool)
     case textEnded(sessionID: String, text: String)
     /// A new block of text begins; the deltas that follow are its words.
@@ -224,8 +233,14 @@ enum ActivityEvent: Equatable, Sendable {
     /// A step ended, with what the context holds after it.
     case stepEnded(sessionID: String, contextTokens: Int?)
     case compaction(sessionID: String, running: Bool)
-    /// The user's message reached the session: the turn it starts is measured from it.
-    case promptDelivered(sessionID: String, messageID: String)
+    /// The user sent the session a message; it waits until the session takes it.
+    case promptQueued(sessionID: String, messageID: String, text: String)
+    /// The user's message reached the session: the turn it starts is measured
+    /// from it. `text` is set when it was looked up rather than heard queued.
+    case promptDelivered(sessionID: String, messageID: String, text: String? = nil)
+    case reasoningStarted(sessionID: String)
+    case reasoningStreamed(sessionID: String, delta: String)
+    case reasoningEnded(sessionID: String, text: String)
     case branchChanged(directory: String, branch: String?)
     /// Any other event about the session, reasoning deltas included: proof
     /// it is alive, which is all a stuck check needs. The reducer ignores it.
@@ -248,9 +263,10 @@ extension ActivityEvent {
     var sessionID: String? {
         switch self {
         case let .executionStarted(id, _), let .executionEnded(id, _, _, _), let .retryScheduled(id, _, _, _),
-             let .toolStarted(id, _, _), let .toolCalled(id, _, _, _), let .toolFinished(id, _, _),
+             let .toolStarted(id, _, _), let .toolCalled(id, _, _, _, _), let .toolFinished(id, _, _),
              let .textEnded(id, _), let .textStarted(id), let .textStreamed(id, _), let .stepEnded(id, _),
-             let .compaction(id, _), let .promptDelivered(id, _), let .permissionSettled(id, _),
+             let .compaction(id, _), let .promptQueued(id, _, _), let .promptDelivered(id, _, _), let .permissionSettled(id, _),
+             let .reasoningStarted(id), let .reasoningStreamed(id, _), let .reasoningEnded(id, _),
              let .formSettled(id, _), let .statusChanged(id, _, _), let .sessionDeleted(id), let .heard(id):
             return id
         case let .permissionAsked(permission): return permission.sessionID
@@ -379,6 +395,7 @@ struct ActivityState: Equatable, Sendable {
             // A new turn: last turn's words no longer describe what it is doing.
             session.lastText = nil
             session.liveText = nil
+            session.reasoning = nil
             session.compacting = false
             session.steps = 0
             activity[id] = session
@@ -388,6 +405,7 @@ struct ActivityState: Equatable, Sendable {
             session.busySince = nil
             session.retry = nil
             session.liveText = nil
+            session.reasoning = nil
             session.compacting = false
             for index in session.calls.indices where session.calls[index].mark == .running {
                 session.calls[index].mark = outcome == .succeeded ? .succeeded : .failed
@@ -407,11 +425,13 @@ struct ActivityState: Equatable, Sendable {
 
         case let .toolStarted(id, callID, name):
             upsertCall(sessionID: id, callID: callID) { $0.name = name }
+            activity[id]?.reasoning = nil
 
-        case let .toolCalled(id, callID, name, target):
+        case let .toolCalled(id, callID, name, target, detail):
             upsertCall(sessionID: id, callID: callID) { call in
                 if let name { call.name = name }
                 if let target { call.target = target }
+                if let detail { call.detail = detail }
             }
 
         case let .toolFinished(id, callID, succeeded):
@@ -441,6 +461,7 @@ struct ActivityState: Equatable, Sendable {
 
         case let .textStarted(id):
             activity[id, default: SessionActivity()].liveText = ""
+            activity[id]?.reasoning = nil
 
         case let .textStreamed(id, delta):
             activity[id, default: SessionActivity()].liveText = (activity[id]?.liveText ?? "") + delta
@@ -453,8 +474,26 @@ struct ActivityState: Equatable, Sendable {
             // The window holds the summary now; the next step says how much that is.
             if !running { activity[id]?.contextTokens = nil }
 
-        case let .promptDelivered(id, messageID):
-            activity[id, default: SessionActivity()].promptID = messageID
+        case let .promptQueued(id, messageID, text):
+            activity[id, default: SessionActivity()].queuedPrompts[messageID] = text
+
+        case let .promptDelivered(id, messageID, text):
+            var session = activity[id, default: SessionActivity()]
+            let queued = session.queuedPrompts.removeValue(forKey: messageID)
+            session.promptID = messageID
+            session.prompt = text ?? queued
+            activity[id] = session
+
+        case let .reasoningStarted(id):
+            activity[id, default: SessionActivity()].reasoning = ""
+
+        case let .reasoningStreamed(id, delta):
+            // Only into a thought still open: words that arrive after a call
+            // or text began belong to nothing on screen.
+            if let reasoning = activity[id]?.reasoning { activity[id]?.reasoning = reasoning + delta }
+
+        case let .reasoningEnded(id, text):
+            activity[id, default: SessionActivity()].reasoning = text
 
         case let .branchChanged(directory, branch):
             branches[directory] = branch
@@ -556,7 +595,7 @@ enum ActivityWire {
         case "session.tool.called":
             guard let sessionID, let callID = data["id"] as? String else { return nil }
             let input = data["input"] as? [String: Any] ?? [:]
-            return .toolCalled(sessionID: sessionID, callID: callID, name: data["name"] as? String, target: target(of: input))
+            return .toolCalled(sessionID: sessionID, callID: callID, name: data["name"] as? String, target: target(of: input), detail: detail(of: input))
         case "session.created", "session.renamed", "session.agent.selected", "session.model.selected":
             guard let sessionID else { return nil }
             let model = data["model"] as? [String: Any]
@@ -583,9 +622,22 @@ enum ActivityWire {
             return sessionID.map { .stepEnded(sessionID: $0, contextTokens: contextTokens(of: data["tokens"])) }
         case "session.compaction.started", "session.compaction.ended", "session.compaction.failed":
             return sessionID.map { .compaction(sessionID: $0, running: type == "session.compaction.started") }
+        case "session.inbox.enqueued":
+            guard let sessionID, let messageID = data["inboxID"] as? String, let item = data["item"] as? [String: Any],
+                  item["type"] as? String == "user", let text = (item["payload"] as? [String: Any])?["text"] as? String
+            else { return sessionID.map(ActivityEvent.heard) }
+            return .promptQueued(sessionID: sessionID, messageID: messageID, text: text)
         case "session.inbox.delivered":
             guard let sessionID, let messageID = data["inboxID"] as? String else { return nil }
             return .promptDelivered(sessionID: sessionID, messageID: messageID)
+        case "session.reasoning.started":
+            return sessionID.map(ActivityEvent.reasoningStarted)
+        case "session.reasoning.delta":
+            guard let sessionID, let delta = data["delta"] as? String else { return nil }
+            return .reasoningStreamed(sessionID: sessionID, delta: delta)
+        case "session.reasoning.ended":
+            guard let sessionID else { return nil }
+            return .reasoningEnded(sessionID: sessionID, text: (data["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines))
         case "vcs.branch.updated":
             return directory.map { .branchChanged(directory: $0, branch: data["branch"] as? String) }
         case "session.tool.success", "session.tool.failed":
@@ -717,6 +769,13 @@ enum ActivityWire {
         if let url = input["url"] as? String { return URL(string: url)?.host ?? url }
         if let pattern = input["pattern"] as? String ?? input["query"] as? String { return pattern }
         return input["description"] as? String
+    }
+
+    /// The target in full where the glance cuts it: the whole path, every
+    /// line of the command, the URL. Capped: a heredoc can be a whole file.
+    static func detail(of input: [String: Any]) -> String? {
+        let full = input["filePath"] as? String ?? input["path"] as? String ?? input["command"] as? String ?? input["url"] as? String
+        return full.map { String($0.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2_000)) }
     }
 
     /// OpenCode stamps events in epoch milliseconds; seconds are accepted too

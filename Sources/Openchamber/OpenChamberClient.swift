@@ -365,6 +365,17 @@ actor OpenChamberClient {
         return TurnDiff(files: (body as? [String: Any])?["data"] as? [[String: Any]] ?? [])
     }
 
+    /// The latest message the user sent the session, which its current or
+    /// last turn answers: its id and what it said.
+    func lastPrompt(sessionID: String, directory: String?) async throws -> (id: String, text: String)? {
+        let body = try await json("GET", "api/session/\(sessionID.urlPathEncoded)/message",
+                                  query: [URLQueryItem(name: "limit", value: "1"), URLQueryItem(name: "order", value: "desc"),
+                                          URLQueryItem(name: "type", value: "user")], directory: directory)
+        guard let message = ((body as? [String: Any])?["data"] as? [[String: Any]])?.first,
+              let id = message["id"] as? String, let text = message["text"] as? String else { return nil }
+        return (id, text)
+    }
+
     /// The branch a project is on, from `GET /api/vcs`; nil outside git.
     func branch(directory: String) async throws -> String? {
         let body = try await json("GET", "api/vcs", directory: directory) as? [String: Any]

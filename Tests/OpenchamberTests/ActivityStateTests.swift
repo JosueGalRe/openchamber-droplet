@@ -25,7 +25,7 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
         wire("session.tool.called", ["sessionID": "s1", "id": "c1", "input": ["filePath": "/repo/src/main.swift"]]),
     ])
     #expect(state.phase(at: t0.addingTimeInterval(5)) == .working(sessions: 1, since: t0))
-    #expect(state.activity["s1"]?.currentCall == ToolCall(id: "c1", name: "edit", target: "main.swift", mark: .running))
+    #expect(state.activity["s1"]?.currentCall == ToolCall(id: "c1", name: "edit", target: "main.swift", mark: .running, detail: "/repo/src/main.swift"))
 
     var done = state
     done.apply(ActivityWire.event(from: wire("session.tool.success", ["sessionID": "s1", "id": "c1"]), now: t0)!)
@@ -274,8 +274,48 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(activity.repeatedFailure == nil)
 }
 
+@Test func aTurnKnowsWhatItWasAskedAndWhatItIsThinking() {
+    var state = state(after: [
+        // Queued while the last turn ran: its words come with the queueing, its id with the delivery.
+        wire("session.inbox.enqueued", ["sessionID": "s1", "inboxID": "msg_q", "item": ["type": "user", "payload": ["text": "Fix the cache"], "delivery": "queue"]]),
+        wire("session.inbox.enqueued", ["sessionID": "s1", "inboxID": "msg_c", "item": ["type": "compaction", "payload": [:]]]),
+        wire("session.inbox.delivered", ["sessionID": "s1", "inboxID": "msg_q"]),
+        wire("session.execution.started", ["sessionID": "s1"]),
+        wire("session.reasoning.started", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0]),
+        wire("session.reasoning.delta", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0, "delta": "The key is "]),
+        wire("session.reasoning.delta", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0, "delta": "the title"]),
+    ])
+    #expect(state.activity["s1"]?.promptID == "msg_q")
+    #expect(state.activity["s1"]?.prompt == "Fix the cache")
+    #expect(state.activity["s1"]?.queuedPrompts.isEmpty == true)
+    #expect(state.activity["s1"]?.reasoning == "The key is the title")
+
+    // The ended thought is the whole of it; a call starting puts it away, and
+    // a late delta does not bring it back.
+    state.apply(ActivityWire.event(from: wire("session.reasoning.ended", ["sessionID": "s1", "assistantMessageID": "msg_a", "ordinal": 0, "text": "The key is the title.\n"]), now: t0)!)
+    #expect(state.activity["s1"]?.reasoning == "The key is the title.")
+    state.apply(.toolStarted(sessionID: "s1", callID: "c1", name: "read"))
+    state.apply(.reasoningStreamed(sessionID: "s1", delta: "late"))
+    #expect(state.activity["s1"]?.reasoning == nil)
+
+    // A prompt looked up later brings its words along.
+    state.apply(.promptDelivered(sessionID: "s1", messageID: "msg_n", text: "Now the tests"))
+    #expect(state.activity["s1"]?.prompt == "Now the tests")
+    // One delivered without being heard queued has no words to show.
+    state.apply(.promptDelivered(sessionID: "s1", messageID: "msg_x"))
+    #expect(state.activity["s1"]?.prompt == nil)
+}
+
+@Test func tokenCountsReadAtAGlance() {
+    #expect(Formatting.tokens(870) == "870")
+    #expect(Formatting.tokens(412_000) == "412k")
+    #expect(Formatting.tokens(999_600) == "1M")
+    #expect(Formatting.tokens(1_048_576) == "1M")
+    #expect(Formatting.tokens(1_500_000) == "1.5M")
+}
+
 @Test func anyOtherEventAboutASessionCountsAsHearingFromIt() {
-    let event = ActivityWire.event(from: wire("session.reasoning.delta", ["sessionID": "s1", "delta": "hmm"]), now: t0)
+    let event = ActivityWire.event(from: wire("session.tool.input.delta", ["sessionID": "s1", "delta": "{"]), now: t0)
     #expect(event == .heard(sessionID: "s1"))
     #expect(event?.sessionID == "s1")
     // Without a session there is nothing to hear from.
@@ -324,6 +364,23 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(Narration.command("for i in 1 2 3; do swift test; done") == "swift test")
     #expect(Narration.command("if [ -f x ]; then make build; fi") == "make build")
     #expect(Narration.command("while true; do sleep 5; done") == "sleep 5")
+    // A loop over lines, and a message before the work: the work.
+    #expect(Narration.command("for f in a b; do\n  printf \"%s\" \"$f\"\ndone\ngit diff --stat | tail -1") == "git diff")
+    #expect(Narration.command("echo \"Probando\" && git log --oneline -5") == "git log")
+}
+
+@Test func theHoverCardGetsTheCallInFull() {
+    let state = state(after: [
+        wire("session.tool.called", ["sessionID": "s1", "id": "c1", "name": "bash", "input": ["command": "for f in a b; do\n  swift test\ndone\n"]]),
+        wire("session.tool.called", ["sessionID": "s1", "id": "c2", "name": "edit", "input": ["filePath": "/r/app/Sources/App/Views.swift"]]),
+    ])
+    let calls = state.activity["s1"]?.calls ?? []
+    #expect(calls.first?.target == "for f in a b; do")
+    #expect(calls.first?.detail == "for f in a b; do\n  swift test\ndone")
+    #expect(calls.first.map(Narration.init(call:))?.object == "swift test")
+    #expect(calls.last?.target == "Views.swift")
+    #expect(Formatting.shortPath(calls.last?.detail ?? "", in: "/r/app") == "Sources/App/Views.swift")
+    #expect(Formatting.shortPath("/elsewhere/x.swift", in: "/r/app") == "/elsewhere/x.swift")
 }
 
 @Test func aFailedTurnCarriesOpenCodesError() {
