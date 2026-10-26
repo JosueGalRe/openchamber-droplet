@@ -2,8 +2,9 @@
 //  ChamberGlyph.swift
 //  Openchamber
 //
-//  OpenChamber's cube, drawn from the geometry in OpenChamber's own
-//  OpenChamberLogo.tsx, with a ring around its silhouette that says the phase.
+//  OpenChamber's open-shell cube, drawn from OpenChamber's own
+//  openChamberLogoArt.ts (scripts/brand), with a ring around its silhouette
+//  that says the phase. Hand-kept: update it when that drawing changes.
 //
 
 import SwiftUI
@@ -13,7 +14,8 @@ import DroppyKit
 enum ChamberGlyphMotion: Equatable {
     /// No ring: the plain mark, for headers and rows.
     case still
-    /// Work of unknown length: a stretch of line climbs both sides and meets at the top.
+    /// Work of unknown length: the roof tiers light up one at a time, a step
+    /// a second, OpenChamber's own loading; a still frame shows a closed ring.
     case sweep
     /// Work with a known end (a scheduled retry, the end of a turn): the ring
     /// fills from the bottom and closes at `end`.
@@ -51,17 +53,21 @@ struct ChamberGlyph: View {
     private var tickInterval: TimeInterval? {
         guard isAnimating, !reduceMotion else { return nil }
         switch motion {
-        case .sweep, .fill: return 1.0 / 12.0
-        case .waiting: return 1
+        case .fill: return 1.0 / 12.0
+        case .sweep, .waiting: return 1
         case .still, .failed: return nil
         }
     }
 
     private func canvas(at date: Date) -> some View {
-        let ring = ChamberGlyph.ring(for: motion, at: date, animated: tickInterval != nil)
+        let animated = tickInterval != nil
+        let ring = ChamberGlyph.ring(for: motion, at: date, animated: animated)
+        let litTier = motion == .sweep && animated ? Int(date.timeIntervalSinceReferenceDate) % ChamberGlyph.tiers.count : nil
         return Canvas { context, canvasSize in
-            context.scaleBy(x: canvasSize.width / 100, y: canvasSize.height / 100)
-            ChamberGlyph.drawCube(in: &context, dimmed: motion != .still)
+            // The edges keep 1.2 points at the notch's sizes, as OpenChamber's widget logo does.
+            let points = canvasSize.width / 100
+            context.scaleBy(x: points, y: points)
+            ChamberGlyph.drawCube(in: &context, dimmed: ring != nil, litTier: litTier, lineWidth: max(2.2, 1.2 / points))
             if let ring {
                 ChamberGlyph.drawRing(ring, in: &context)
             }
@@ -82,9 +88,6 @@ extension ChamberGlyph {
         var glows: Bool
     }
 
-    static let sweepPeriod: TimeInterval = 1.6
-    static let sweepLength = 46.0 / 144.0
-
     /// The ring at `date`. With `animated` false the glyph shows the ring's
     /// resting shape: closed for work, so a still frame still says "busy".
     static func ring(for motion: ChamberGlyphMotion, at date: Date, animated: Bool) -> Ring? {
@@ -93,10 +96,8 @@ extension ChamberGlyph {
         case .still:
             return nil
         case .sweep:
-            guard animated else { return Ring(from: 0, to: 1, color: primary, glows: false) }
-            let phase = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: sweepPeriod) / sweepPeriod
-            let head = phase * (1 + sweepLength)
-            return Ring(from: max(0, head - sweepLength), to: min(1, head), color: primary, glows: false)
+            // Moving, the tiers say it; held still, a closed ring still says busy.
+            return animated ? nil : Ring(from: 0, to: 1, color: primary, glows: false)
         case let .fill(start, end):
             let span = end.timeIntervalSince(start)
             let progress = span > 0 ? date.timeIntervalSince(start) / span : 1
@@ -112,15 +113,24 @@ extension ChamberGlyph {
 
 // MARK: - Geometry
 
+extension ChamberGlyph {
+    /// The roof tiers, outermost first: their size as a share of the roof, and
+    /// their fill at rest, while another tier is lit, and lit.
+    static let tiers: [(scale: CGFloat, still: Double, dim: Double, lit: Double)] = [
+        (0.8, 0.22, 0.12, 0.55),
+        (0.58, 0.27, 0.15, 0.48),
+        (0.36, 0.85, 0.38, 0.85),
+    ]
+}
+
 private extension ChamberGlyph {
-    // The isometric cube from OpenChamberLogo.tsx: edge 48, centred at (50, 50)
-    // in a 100-point box.
+    // The logo's -50…50 box moved into a 100-point one: edge 48, centred at (50, 50).
     static let top = CGPoint(x: 50, y: 2)
-    static let left = CGPoint(x: 8.43, y: 26)
-    static let right = CGPoint(x: 91.57, y: 26)
+    static let left = CGPoint(x: 8.432, y: 26)
+    static let right = CGPoint(x: 91.568, y: 26)
     static let center = CGPoint(x: 50, y: 50)
-    static let bottomLeft = CGPoint(x: 8.43, y: 74)
-    static let bottomRight = CGPoint(x: 91.57, y: 74)
+    static let bottomLeft = CGPoint(x: 8.432, y: 74)
+    static let bottomRight = CGPoint(x: 91.568, y: 74)
     static let bottom = CGPoint(x: 50, y: 98)
 
     static func polygon(_ points: [CGPoint]) -> Path {
@@ -141,31 +151,38 @@ private extension ChamberGlyph {
     static let leftSide = polyline([bottom, bottomLeft, left, top])
     static let rightSide = polyline([bottom, bottomRight, right, top])
 
-    /// The OpenCode mark on the lid, projected onto the top face.
-    static let lidTransform = CGAffineTransform(a: 0.866, b: 0.5, c: -0.866, d: 0.5, tx: 50, ty: 26)
-        .scaledBy(x: 0.75, y: 0.75)
+    /// The roof, or a tier on it, at `scale` of the roof.
+    static func rhombus(_ scale: CGFloat) -> Path {
+        let half = (x: (right.x - left.x) / 2 * scale, y: (center.y - top.y) / 2 * scale)
+        let mid = CGPoint(x: 50, y: 26)
+        return polygon([CGPoint(x: mid.x, y: mid.y - half.y), CGPoint(x: mid.x + half.x, y: mid.y),
+                        CGPoint(x: mid.x, y: mid.y + half.y), CGPoint(x: mid.x - half.x, y: mid.y)])
+    }
 
-    static let lidFrame: Path = {
-        var path = Path()
-        path.addRect(CGRect(x: -16, y: -20, width: 32, height: 40))
-        path.addRect(CGRect(x: -8, y: -12, width: 16, height: 24))
-        return path.applying(lidTransform)
+    /// The edges: the roof's outline, the shell's sides and the front corner.
+    static let shell: Path = {
+        var path = polygon([top, left, center, right])
+        path.addLines([left, bottomLeft, bottom, bottomRight, right])
+        path.move(to: center)
+        path.addLine(to: bottom)
+        return path
     }()
 
-    static let lidCaret = Path(CGRect(x: -8, y: -4, width: 16, height: 16)).applying(lidTransform)
-
-    static func drawCube(in context: inout GraphicsContext, dimmed: Bool) {
+    /// The open shell: the back walls seen through its missing front, a faint
+    /// roof, three tiers that brighten toward the middle, and its edges.
+    /// `dimmed` steps it back behind a ring; `litTier` is the one lit while it works.
+    static func drawCube(in context: inout GraphicsContext, dimmed: Bool, litTier: Int?, lineWidth: CGFloat) {
         let ink = AdaptiveColors.notchSurfacePrimaryText
-        let edge = ink.opacity(dimmed ? 0.3 : 1)
-        let stroke = StrokeStyle(lineWidth: 5, lineJoin: .round)
-
-        for face in [polygon([center, left, bottomLeft, bottom]), polygon([center, right, bottomRight, bottom])] {
-            context.fill(face, with: .color(ink.opacity(dimmed ? 0.12 : 0.25)))
-            context.stroke(face, with: .color(edge), style: stroke)
+        let fade = dimmed ? 0.5 : 1
+        context.fill(polygon([left, bottomLeft, center]), with: .color(ink.opacity(0.12 * fade)))
+        context.fill(polygon([right, center, bottomRight]), with: .color(ink.opacity(0.15 * fade)))
+        context.fill(rhombus(1), with: .color(ink.opacity(0.08 * fade)))
+        for (index, tier) in tiers.enumerated() {
+            let opacity = litTier.map { $0 == index ? tier.lit : tier.dim } ?? tier.still
+            context.fill(rhombus(tier.scale), with: .color(ink.opacity(opacity * fade)))
         }
-        context.stroke(polygon([top, left, center, right]), with: .color(edge), style: stroke)
-        context.fill(lidFrame, with: .color(ink.opacity(dimmed ? 0.85 : 1)), style: FillStyle(eoFill: true))
-        context.fill(lidCaret, with: .color(ink.opacity(0.4)))
+        context.stroke(shell, with: .color(ink.opacity(dimmed ? 0.35 : 1)),
+                       style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
     }
 
     static func drawRing(_ ring: Ring, in context: inout GraphicsContext) {
