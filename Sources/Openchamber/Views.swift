@@ -2071,7 +2071,7 @@ struct MenuBarSummary: View {
             ForEach(ids.prefix(5), id: \.self) { id in
                 Button { droplet.openSession(id) } label: {
                     HStack(spacing: DroppySpacing.xsm) {
-                        Text(state.sessions[id]?.title ?? "Session")
+                        Text(state.sessions[id]?.title ?? "Session").lineLimit(1)
                         if waiting.contains(id) {
                             Image(systemName: "hand.raised.fill").foregroundStyle(.orange)
                         }
@@ -2090,15 +2090,51 @@ struct MenuBarSummary: View {
             }
         }
         .foregroundStyle(AdaptiveColors.primaryTextAuto)
+        // A menu item's own view brings no inset: this is the menu's text margin.
+        .padding(.horizontal, DroppySpacing.mdl)
         .padding(.vertical, DroppySpacing.xs)
-        .frame(minWidth: 200, alignment: .leading)
+        .frame(minWidth: 260, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
+        .background(MenuItemFitter(height: height))
     }
+
+    @State private var height: CGFloat = 0
 
     /// `1 needs you · 3 running`: the whole state, so the list under it is not read as all waiting.
     private var header: String {
         guard case let .waiting(count) = droplet.phase else { return OpenchamberDroplet.summary(of: droplet.phase, now: Date()) }
         let busy = droplet.state.busySessionIDs.count
         return (["\(count) \(count == 1 ? "needs" : "need") you"] + (busy > 0 ? ["\(busy) running"] : [])).joined(separator: " · ")
+    }
+}
+
+/// Droppy mounts a menu bar extra's content in one menu item a row (24 points)
+/// high, so anything taller is centred and clipped. Once the content is in the
+/// menu this grows that item to the content's height.
+/// shortcut: works around the host's sizing (Droppy 16.2 beta, Playground 1.0.29); drop it once Droppy sizes the item itself.
+private struct MenuItemFitter: NSViewRepresentable {
+    let height: CGFloat
+
+    func makeNSView(context: Context) -> Probe { Probe() }
+
+    func updateNSView(_ probe: Probe, context: Context) {
+        probe.height = height
+        probe.fit()
+    }
+
+    final class Probe: NSView {
+        var height: CGFloat = 0
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            fit()
+        }
+
+        func fit() {
+            guard height > 0, let view = enclosingMenuItem?.view, abs(view.frame.height - height) > 0.5 else { return }
+            view.setFrameSize(NSSize(width: view.frame.width, height: height))
+        }
     }
 }
 
