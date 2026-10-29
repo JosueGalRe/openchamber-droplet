@@ -88,6 +88,10 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     ]))
     #expect(state.busySessionIDs == ["parent"])
     #expect(state.unknownSessionIDs.isEmpty)
+
+    // A parent idle while its background subagent works: the subagent is the work.
+    state.apply(.executionEnded(sessionID: "parent", outcome: .succeeded, at: t0))
+    #expect(state.busySessionIDs == ["child"])
 }
 
 @Test func theSeedReplacesPendingAndClearsWhatStopped() {

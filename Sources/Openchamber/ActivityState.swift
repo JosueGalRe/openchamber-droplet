@@ -338,13 +338,24 @@ struct ActivityState: Equatable, Sendable {
         return result
     }
 
-    /// Sessions that are busy now, longest-running first. Subagent sessions
-    /// are left out once we know they are subagents: the parent already counts.
+    /// Sessions that are busy now, longest-running first. A subagent is left
+    /// out while a session above it is busy, which already counts; a background
+    /// one whose parent went idle waiting for it is the only sign of the work.
     var busySessionIDs: [String] {
         activity
-            .filter { $0.value.isBusy && sessions[$0.key]?.parentID == nil }
+            .filter { $0.value.isBusy && !hasBusyAncestor($0.key) }
             .sorted { ($0.value.busySince ?? .distantPast) < ($1.value.busySince ?? .distantPast) }
             .map(\.key)
+    }
+
+    private func hasBusyAncestor(_ id: String) -> Bool {
+        var seen: Set<String> = [id]
+        var parent = sessions[id]?.parentID
+        while let current = parent, seen.insert(current).inserted {
+            if activity[current]?.isBusy == true { return true }
+            parent = sessions[current]?.parentID
+        }
+        return false
     }
 
     /// Ids we have events for but no title yet.

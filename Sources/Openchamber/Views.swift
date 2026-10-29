@@ -41,6 +41,12 @@ enum Formatting {
         return [model, agent, server].compactMap { $0 }.joined(separator: " · ")
     }
 
+    /// `↳ Port NVR Administration 2b.2`: the session a subagent works for,
+    /// where a main session shows its project.
+    static func parent(of session: SessionInfo?, in state: ActivityState) -> String? {
+        session?.parentID.map { "↳ " + (state.sessions[$0]?.title ?? "Subagent") }
+    }
+
     /// `5-hour limit`, `Weekly · all models`, `Weekly · Fable`.
     static func windowLabel(_ window: QuotaWindow, in provider: ProviderQuota) -> String {
         let base: String
@@ -473,15 +479,15 @@ private struct SessionsPage: View {
                         SessionLine(droplet: droplet, sessionID: id, oneLine: true) { expanded = id }
                     }
                 } else {
-                    ForEach(busy.suffix(3).reversed(), id: \.self) { id in
-                        SessionLine(droplet: droplet, sessionID: id, oneLine: false, compact: context.isNarrow) { expanded = id }
+                    // Two lines a session fit three; past that a line each, so
+                    // every one shows up to five and the last counts the rest.
+                    let oneLine = busy.count > 3
+                    let rows = Array(busy.suffix(oneLine ? 5 : 3).reversed())
+                    ForEach(rows, id: \.self) { id in
+                        SessionLine(droplet: droplet, sessionID: id, oneLine: oneLine, compact: context.isNarrow,
+                                    more: id == rows.last ? busy.count - rows.count : 0) { expanded = id }
                     }
                     Spacer(minLength: 0)
-                    if busy.count > 3 {
-                        Text(verbatim: "+\(busy.count - 3) more")
-                            .font(.system(size: 11))
-                            .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
-                    }
                 }
             }
             .onChange(of: busy) { _, ids in
@@ -554,7 +560,7 @@ private struct SessionHero: View {
                                       stuck: droplet.stuck[sessionID], hidesObject: droplet.presenting)
                         if !compact {
                             Spacer(minLength: DroppySpacing.md)
-                            Text(session?.project ?? "")
+                            Text(Formatting.parent(of: session, in: droplet.state) ?? session?.project ?? "")
                                 .font(.system(size: 12))
                                 .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                                 .lineLimit(1)
@@ -673,7 +679,11 @@ private struct SessionLine: View {
             HStack(spacing: DroppySpacing.sm) {
                 AgentMark(provider: session?.providerID ?? "", size: 16)
                 if oneLine {
-                    (title + Text(verbatim: doing.map { "  " + $0 } ?? "")
+                    // No room for the parent's name on one line: the arrow says subagent.
+                    (Text(verbatim: session?.parentID == nil ? "" : "↳ ")
+                        .font(.system(size: 13))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                        + title + Text(verbatim: doing.map { "  " + $0 } ?? "")
                         .font(.system(size: 12))
                         .foregroundStyle(stuck == nil ? AdaptiveColors.notchSurfaceTertiaryText : Color.yellow))
                         .lineLimit(1)
@@ -696,7 +706,8 @@ private struct SessionLine: View {
                 HStack(spacing: DroppySpacing.sm) {
                     NarrationText(narration: activity.narration, failed: false, size: 12, stuck: stuck, hidesObject: droplet.presenting)
                     Spacer(minLength: DroppySpacing.sm)
-                    Text([droplet.serverLabel(forSession: sessionID), compact ? nil : session?.project].compactMap { $0 }.joined(separator: " · "))
+                    Text([droplet.serverLabel(forSession: sessionID),
+                          compact ? nil : Formatting.parent(of: session, in: droplet.state) ?? session?.project].compactMap { $0 }.joined(separator: " · "))
                         .font(.system(size: 11))
                         .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                         .lineLimit(1)
