@@ -225,8 +225,9 @@ enum ExecutionOutcome: String, Equatable, Sendable {
 
 /// The facts the reducer understands, already lifted out of the wire format.
 enum ActivityEvent: Equatable, Sendable {
-    /// `/api/sessions/status`: replaces what is busy and what is pending.
-    case seeded(busy: Set<String>, permissions: [PendingPermission], forms: [PendingForm], at: Date)
+    /// `/api/sessions/status`: replaces what is busy, with when each turn
+    /// started, and what is pending.
+    case seeded(busy: [String: Date], permissions: [PendingPermission], forms: [PendingForm])
     case sessionsListed([SessionInfo])
     case executionStarted(sessionID: String, at: Date)
     /// `error` is OpenCode's, as `ProviderAuthError: token expired`, on a failure.
@@ -392,11 +393,9 @@ struct ActivityState: Equatable, Sendable {
 
     mutating func apply(_ event: ActivityEvent) {
         switch event {
-        case let .seeded(busy, permissions, forms, at):
-            for id in busy where activity[id]?.isBusy != true {
-                activity[id, default: SessionActivity()].busySince = at
-            }
-            for (id, value) in activity where value.isBusy && !busy.contains(id) {
+        case let .seeded(busy, permissions, forms):
+            for (id, since) in busy { markBusy(id, since: since) }
+            for (id, value) in activity where value.isBusy && busy[id] == nil {
                 activity[id]?.busySince = nil
                 activity[id]?.retry = nil
             }
@@ -537,7 +536,7 @@ struct ActivityState: Equatable, Sendable {
 
         case let .statusChanged(id, busy, at):
             if busy {
-                if activity[id]?.isBusy != true { activity[id, default: SessionActivity()].busySince = at }
+                markBusy(id, since: at)
             } else if activity[id]?.isBusy == true {
                 activity[id]?.busySince = nil
                 activity[id]?.retry = nil
@@ -549,6 +548,13 @@ struct ActivityState: Equatable, Sendable {
             permissions.removeAll { $0.sessionID == id }
             forms.removeAll { $0.sessionID == id }
         }
+    }
+
+    /// A turn running since `since`: an earlier start corrects one taken from
+    /// when the droplet first saw it, and a later one never moves it on.
+    private mutating func markBusy(_ id: String, since: Date) {
+        let current = activity[id]?.busySince ?? since
+        activity[id, default: SessionActivity()].busySince = min(current, since)
     }
 
     private mutating func upsertCall(sessionID: String, callID: String, _ update: (inout ToolCall) -> Void) {
@@ -582,8 +588,10 @@ enum ActivityWire {
             guard let properties = payload["properties"] as? [String: Any],
                   let id = properties["sessionID"] as? String,
                   let status = properties["status"] as? String else { return nil }
+            let busy = status == "busy" || status == "retry"
             let at = date(fromMilliseconds: properties["timestamp"]) ?? now
-            return .statusChanged(sessionID: id, busy: status == "busy" || status == "retry", at: at)
+            // A busy status carries its turn's start once OpenChamber knows it.
+            return .statusChanged(sessionID: id, busy: busy, at: busy ? date(fromMilliseconds: properties["turnStartedAt"]) ?? at : at)
         }
 
         guard let data = payload["data"] as? [String: Any] else { return nil }
@@ -683,10 +691,12 @@ enum ActivityWire {
     /// `GET /api/sessions/status`.
     static func seed(from body: [String: Any], now: Date) -> ActivityEvent {
         let statuses = body["sessions"] as? [String: [String: Any]] ?? [:]
-        let busy = Set(statuses.compactMap { id, value -> String? in
-            let status = value["status"] as? String
-            return status == "busy" || status == "retry" ? id : nil
-        })
+        let serverTime = date(fromMilliseconds: body["serverTime"]) ?? now
+        var busy: [String: Date] = [:]
+        for (id, value) in statuses where ["busy", "retry"].contains(value["status"] as? String) {
+            // A turn that started before the droplet connected keeps its real start.
+            busy[id] = date(fromMilliseconds: value["turnStartedAt"]) ?? serverTime
+        }
         var permissions: [PendingPermission] = []
         var forms: [PendingForm] = []
         for (_, entry) in body["pending"] as? [String: [String: Any]] ?? [:] {
@@ -697,7 +707,7 @@ enum ActivityWire {
                 if let form = form(from: item, directory: nil) { forms.append(form) }
             }
         }
-        return .seeded(busy: busy, permissions: permissions, forms: forms, at: date(fromMilliseconds: body["serverTime"]) ?? now)
+        return .seeded(busy: busy, permissions: permissions, forms: forms)
     }
 
     /// One session record from `GET /api/session` or `GET /api/session/:id`.

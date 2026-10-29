@@ -110,6 +110,23 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(state.forms.map(\.title) == ["Which branch?"])
 }
 
+@Test func aTurnRunningBeforeTheDropletConnectedKeepsItsStart() {
+    var state = ActivityState()
+    let started = t0.addingTimeInterval(-3_600)
+    state.apply(ActivityWire.seed(from: [
+        "sessions": ["s1": ["status": "busy", "turnStartedAt": ms(started)], "s2": ["status": "busy"]],
+        "serverTime": ms(t0),
+    ], now: t0))
+    #expect(state.activity["s1"]?.busySince == started)
+    #expect(state.activity["s2"]?.busySince == t0)
+
+    // OpenChamber reads a start it did not see back from history and says so later.
+    let status: [String: Any] = ["type": "openchamber:session-status",
+                                 "properties": ["sessionID": "s2", "status": "busy", "timestamp": ms(t0), "turnStartedAt": ms(started)]]
+    state.apply(ActivityWire.event(from: status, now: t0)!)
+    #expect(state.activity["s2"]?.busySince == started)
+}
+
 @Test func openChambersStatusEventIsTheBackstop() {
     var state = ActivityState()
     let busy: [String: Any] = ["type": "openchamber:session-status", "properties": ["sessionID": "s1", "status": "busy", "timestamp": ms(t0)]]

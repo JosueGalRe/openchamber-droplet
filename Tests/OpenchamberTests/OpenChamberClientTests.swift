@@ -46,7 +46,7 @@ private var relay: [String: Any] { [
     var work = ActivityState()
     work.apply(.permissionAsked(PendingPermission(id: "p2", sessionID: "w1", action: "edit", resources: [], directory: nil)))
     // A seed from the work server must not touch the Mac's request.
-    work.apply(.seeded(busy: [], permissions: [], forms: [], at: Date()))
+    work.apply(.seeded(busy: [:], permissions: [], forms: []))
 
     #expect(ActivityState.merged([mac, work]).permissions.map(\.id) == ["p1"])
 }

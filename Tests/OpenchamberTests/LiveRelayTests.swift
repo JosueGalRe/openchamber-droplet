@@ -29,7 +29,7 @@ func liveRelayReachesARemoteServer() async throws {
     try await tunnel.connect(appVersion: "droplet-live-test")
 
     let client = OpenChamberClient(server: server, route: .relay(tunnel))
-    guard case let .seeded(busy, permissions, forms, _) = try await client.seed() else {
+    guard case let .seeded(busy, permissions, forms) = try await client.seed() else {
         Issue.record("the seed was not a seed")
         return
     }
