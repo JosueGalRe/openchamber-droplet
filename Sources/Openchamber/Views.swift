@@ -233,32 +233,49 @@ struct CompactLabel: View {
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { timeline in
             let (symbol, text, color) = label(at: timeline.date)
-            HStack(spacing: 3) {
+            // The wing gives the label 48 points: dots and a time fit while the
+            // turn is under ten minutes and two run. Past that the dots give way
+            // to a count (working, they are all white and say only how many),
+            // then the time to the dots. The count's size is explicit:
+            // ViewThatFits measures text unscaled.
+            ViewThatFits(in: .horizontal) {
+                row(symbol: symbol, text: text, dots: dots)
                 if let dots {
-                    // One per session, orange for one that waits on you: who needs
-                    // you reads without a number.
-                    HStack(spacing: 3) {
-                        ForEach(dots.indices, id: \.self) { index in
-                            Circle()
-                                .fill(dots[index] ? Color.orange : AdaptiveColors.notchSurfacePrimaryText)
-                                .frame(width: 5, height: 5)
-                        }
+                    if !text.isEmpty {
+                        row(symbol: symbol, text: "\(dots.count)\u{2009}·\u{2009}\(text)", dots: nil, size: DroppyLiveActivityMetrics.labelFontSize - 2)
                     }
-                    .padding(.trailing, 2)
+                    row(symbol: symbol, text: "", dots: dots)
                 }
-                if let symbol {
-                    // A lone symbol (the green check) stands in for a word, so it is drawn larger.
-                    Image(systemName: symbol).font(.system(size: DroppyLiveActivityMetrics.labelFontSize + (text.isEmpty ? 3 : -2), weight: .semibold))
-                }
-                Text(verbatim: text)
-                    .font(.system(size: DroppyLiveActivityMetrics.labelFontSize, weight: .medium, design: .rounded))
-                    .monospacedDigit()
-                    .minimumScaleFactor(0.75)
             }
             .foregroundStyle(color)
             .lineLimit(1)
             .id(kind)
             .transition(DroppyTransition.compactContent)
+        }
+    }
+
+    private func row(symbol: String?, text: String, dots: [Bool]?, size: CGFloat = DroppyLiveActivityMetrics.labelFontSize) -> some View {
+        HStack(spacing: 3) {
+            if let dots {
+                // One per session, orange for one that waits on you: who needs
+                // you reads without a number.
+                HStack(spacing: 3) {
+                    ForEach(dots.indices, id: \.self) { index in
+                        Circle()
+                            .fill(dots[index] ? Color.orange : AdaptiveColors.notchSurfacePrimaryText)
+                            .frame(width: 5, height: 5)
+                    }
+                }
+                .padding(.trailing, 2)
+            }
+            if let symbol {
+                // A lone symbol (the green check) stands in for a word, so it is drawn larger.
+                Image(systemName: symbol).font(.system(size: DroppyLiveActivityMetrics.labelFontSize + (text.isEmpty ? 3 : -2), weight: .semibold))
+            }
+            Text(verbatim: text)
+                .font(.system(size: size, weight: .medium, design: .rounded))
+                .monospacedDigit()
+                .minimumScaleFactor(0.75)
         }
     }
 
