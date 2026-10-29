@@ -192,6 +192,16 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(state.sessions["ghost"] == nil)
 }
 
+@Test func aChatIsNamedChatNotByItsFolder() {
+    let chat = SessionInfo(id: "c", title: "T", directory: "/Users/me/.config/openchamber/chats/2026-10-24/session-e1cd64e5-4b01-4c31-8b5f-080fb3680563", parentID: nil)
+    #expect(chat.isChat)
+    #expect(chat.project == "Chat")
+    // A project is its folder, even one whose name starts the same way.
+    let project = SessionInfo(id: "p", title: "T", directory: "/Users/me/projects/session-replay", parentID: nil)
+    #expect(!project.isChat)
+    #expect(project.project == "session-replay")
+}
+
 @Test func theRunnerNamesModelProfileAndServer() {
     let session = SessionInfo(id: "s1", title: "T", directory: "/r", parentID: nil, providerID: "kiro", modelID: "kiro/claude-sonnet-4.5", agent: "build")
     #expect(Formatting.runner(of: session, server: "devbox") == "claude-sonnet-4.5 · Build · devbox")

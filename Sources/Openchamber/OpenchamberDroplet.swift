@@ -1168,7 +1168,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// session a reply would go to.
     private func clipboardTarget(for text: String) -> String? {
         let named = state.sessions.values
-            .filter { $0.parentID == nil && !$0.directory.isEmpty && (text.contains($0.directory) || text.contains("/\($0.project)/")) }
+            .filter { $0.parentID == nil && !$0.directory.isEmpty && (text.contains($0.directory) || !$0.isChat && text.contains("/\($0.project)/")) }
             .max { lhs, rhs in
                 let a = state.activity[lhs.id], b = state.activity[rhs.id]
                 return (a?.isBusy == true ? 1 : 0, a?.finishedAt ?? .distantPast) < (b?.isBusy == true ? 1 : 0, b?.finishedAt ?? .distantPast)
@@ -1182,7 +1182,8 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     func startSession(project: String, prompt: String) {
         let path = (project as NSString).expandingTildeInPath
         let known = state.sessions.values.first {
-            path.hasPrefix("/") ? $0.directory == path : $0.project.caseInsensitiveCompare(project) == .orderedSame
+            // A chat's folder is its own: a new session never goes into one by name.
+            path.hasPrefix("/") ? $0.directory == path : !$0.isChat && $0.project.caseInsensitiveCompare(project) == .orderedSame
         }
         let directory = known?.directory ?? (path.hasPrefix("/") ? path : nil)
         let serverID = known.flatMap { serverID(forSession: $0.id) }

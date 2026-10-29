@@ -23,8 +23,17 @@ struct SessionInfo: Equatable, Sendable {
     /// How hard the model reasons: `xhigh`, `medium`, `default`, …
     var variant: String? = nil
 
-    /// The folder name, which is how OpenChamber's sidebar names a project.
-    var project: String { (directory as NSString).lastPathComponent }
+    /// The folder name, which is how OpenChamber's sidebar names a project;
+    /// `Chat` for one of its chats, whose folder is only an id.
+    var project: String { isChat ? "Chat" : (directory as NSString).lastPathComponent }
+
+    /// One of OpenChamber's chats rather than a project: it gives each its
+    /// own folder, `<chats root>/2026-10-24/session-<uuid>`, wherever the root is.
+    var isChat: Bool {
+        let folder = directory as NSString
+        return folder.lastPathComponent.hasPrefix("session-")
+            && (folder.deletingLastPathComponent as NSString).lastPathComponent.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+    }
 }
 
 /// One tool call in the strip of recent calls a session row shows.
