@@ -485,6 +485,9 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         guard var server = serverStates[serverID] else { return }
         let now = Date()
         if let id = event.sessionID { lastHeard[id] = now }
+        // Nothing could be heard before the feed connected: a turn already
+        // running when it did starts its quiet clock now, not at the turn's start.
+        if case let .seeded(busy, _, _) = event { for id in busy.keys { lastHeard[id] = now } }
         switch event {
         case .heard:
             return
