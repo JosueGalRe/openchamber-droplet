@@ -74,6 +74,30 @@ private var relay: [String: Any] { [
     #expect(reset)
 }
 
+@Test func aSilentEventStreamEndsInsteadOfWaitingForever() async {
+    let (texts, input) = AsyncThrowingStream<String, Error>.makeStream()
+    defer { input.finish() }
+    do {
+        for try await _ in OpenChamberClient.frames(from: texts, silenceLimit: .milliseconds(100)) {}
+        Issue.record("a silent stream must not end cleanly")
+    } catch {
+        #expect(error as? OpenChamberError == .silent)
+    }
+}
+
+@Test func heartbeatsKeepTheEventStreamOpen() async throws {
+    let (texts, input) = AsyncThrowingStream<String, Error>.makeStream()
+    Task {
+        // Longer than the limit in all, never that long between two.
+        for _ in 0..<8 {
+            input.yield(#"{"type":"event","payload":{"type":"openchamber:heartbeat","timestamp":1}}"#)
+            try? await Task.sleep(for: .milliseconds(40))
+        }
+        input.finish()
+    }
+    for try await _ in OpenChamberClient.frames(from: texts, silenceLimit: .milliseconds(150)) {}
+}
+
 @Test func claudeUsageKeepsItsPerModelWindowsAndReadsLikeAgents() throws {
     let body: [String: Any] = [
         "ok": true, "providerName": "Claude", "planLabel": "Max (5x)",

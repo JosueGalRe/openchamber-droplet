@@ -9,17 +9,20 @@
 //
 
 import Foundation
+import os
 
 enum OpenChamberError: Error, Equatable, LocalizedError {
     case unauthorized
     case http(Int)
     case invalidResponse
+    case silent
 
     var errorDescription: String? {
         switch self {
         case .unauthorized: return "OpenChamber rejected the token OpenChamber Desktop has for this server."
         case let .http(status): return "OpenChamber answered \(status)."
         case .invalidResponse: return "OpenChamber sent something this droplet cannot read."
+        case .silent: return "OpenChamber's event stream went silent, not even a heartbeat."
         }
     }
 }
@@ -513,20 +516,7 @@ actor OpenChamberClient {
             // The host opens the socket on its own loopback, with its own origin.
             var components = URLComponents()
             components.queryItems = query
-            let messages = try await tunnel.webSocket(path: "/api/global/event/ws", query: components.percentEncodedQuery ?? "")
-            return AsyncThrowingStream { continuation in
-                let reader = Task {
-                    do {
-                        for try await text in messages {
-                            if let frame = Self.frame(from: text) { continuation.yield(frame) }
-                        }
-                        continuation.finish()
-                    } catch {
-                        continuation.finish(throwing: error)
-                    }
-                }
-                continuation.onTermination = { _ in reader.cancel() }
-            }
+            return Self.frames(from: try await tunnel.webSocket(path: "/api/global/event/ws", query: components.percentEncodedQuery ?? ""))
         case let .direct(url):
             baseURL = url
         }
@@ -546,13 +536,11 @@ actor OpenChamberClient {
         task.maximumMessageSize = 16 * 1024 * 1024
         task.resume()
 
-        return AsyncThrowingStream { continuation in
+        let texts = AsyncThrowingStream<String, Error> { continuation in
             let reader = Task {
                 do {
                     while !Task.isCancelled {
-                        let message = try await task.receive()
-                        guard case let .string(text) = message, let frame = Self.frame(from: text) else { continue }
-                        continuation.yield(frame)
+                        if case let .string(text) = try await task.receive() { continuation.yield(text) }
                     }
                     continuation.finish()
                 } catch {
@@ -562,6 +550,41 @@ actor OpenChamberClient {
             continuation.onTermination = { _ in
                 reader.cancel()
                 task.cancel(with: .goingAway, reason: nil)
+            }
+        }
+        return Self.frames(from: texts)
+    }
+
+    /// OpenChamber puts a heartbeat on the socket every 15 seconds. A socket
+    /// whose server went away without closing it, a WSL reboot say, never
+    /// errors and `receive()` waits on it forever, so silence this long ends it.
+    static let silenceLimit: Duration = .seconds(60)
+
+    static func frames(from texts: AsyncThrowingStream<String, Error>, silenceLimit: Duration = silenceLimit) -> AsyncThrowingStream<EventFrame, Error> {
+        AsyncThrowingStream { continuation in
+            let lastHeard = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
+            let reader = Task {
+                do {
+                    for try await text in texts {
+                        lastHeard.withLock { $0 = .now }
+                        if let frame = frame(from: text) { continuation.yield(frame) }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            let watchdog = Task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: silenceLimit / 4)
+                    if ContinuousClock.now - lastHeard.withLock({ $0 }) > silenceLimit {
+                        continuation.finish(throwing: OpenChamberError.silent)
+                    }
+                }
+            }
+            continuation.onTermination = { _ in
+                reader.cancel()
+                watchdog.cancel()
             }
         }
     }
