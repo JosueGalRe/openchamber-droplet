@@ -1645,7 +1645,10 @@ extension OpenchamberDroplet: ShelfWidgetProviding {
                 layoutTraits: ShelfWidgetLayoutTraits(
                     preferredSoloWidth: 440,
                     preferredPairedWidth: 240,
-                    contentHeight: .fixed(176)
+                    contentHeight: .fixed(176),
+                    // The header's halves beside the camera: the status, and
+                    // up to three 24pt discs 6 apart.
+                    notchWrap: ShelfWidgetNotchWrapTraits(headerHeight: 24, minimumBandWidth: 84)
                 ),
                 searchKeywords: ["opencode", "agent", "session", "permission", "approve", "quota", "usage", "claude", "codex"]
             ),

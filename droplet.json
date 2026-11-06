@@ -7,7 +7,7 @@
   "category": "Productivity",
   "kit": {
     "abi": 1,
-    "minAPI": "1.19.0"
+    "minAPI": "1.22.0"
   },
   "minAppVersion": "16.0.1",
   "capabilities": [

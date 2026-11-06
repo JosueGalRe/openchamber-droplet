@@ -9,7 +9,7 @@ the notch, the shelf, the lock screen and the menu bar.
 
 - Droplet id: `openchamber`. It is also `OpenchamberDroplet.id` in Swift and `id` in `droplet.json`; the three must agree or the loader refuses the bundle.
 - Swift product: `Openchamber`, a dynamic library. The harness target is `OpenchamberHarness`.
-- SDK checkout: `/Users/josuegalre/projects/personal/droppykit` (DroppyKit 1.20.1). Docs online: https://getdroppy.app/docs/droppykit
+- SDK checkout: `/Users/josuegalre/projects/personal/droppykit` (DroppyKit 1.22.0). Docs online: https://getdroppy.app/docs/droppykit
 - Host: Droppy 15.3 or later, which runs an unsigned bundle once its user approves that build under Settings, Store, Local droplets and asks again each time it opens, or the free Droppy Playground (https://getdroppy.app/download/playground), which loads unsigned bundles without asking.
 
 ## The loop
@@ -63,7 +63,8 @@ package pins; `droppykit update` moves both to the newest release. A build that 
   size, exactly what the harness renders; Droppy adds its own chrome around it. `.fixed(150)`
   is a 150-point rectangle, alone and in a row, clamped to 48 through 480. A widget that needs
   more height declares more; it never pads its way out of a clip. A solo widget is never
-  narrower than 352 on a notch or 370 on an island, so lay out to `context.availableSize`.
+  narrower than 352 on a notch or 370 on an island (the camera island's included), so lay out
+  to `context.availableSize`.
 - **No card, no border around the widget.** Droppy paints nothing behind a widget and almost
   every one of its own widgets lays its content directly on the shelf's black. Put no
   background, fill, outline or rounded box on the widget's root view. `notchSurfaceCardFill`
@@ -71,10 +72,16 @@ package pins; `droppykit update` moves both to the newest release. A build that 
 - **Lay the widget out like Droppy's.** The root view fills the rectangle
   (`.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)`) with ONE
   padding, `.padding(context.contentInsets)`, and nothing on top of it. It clears the host's
-  rounded clip: 8 on every edge under the 18pt card corner (a notch, and any row on either
-  shape), 0 alone on the island, where the island shell clips the card and keeps one even gap.
-  The shelf's chrome already inset the rectangle, so never add your own padding or corner
-  inset on top: it doubles the gap.
+  rounded clip: 8 on every edge alone under a notch (the 18pt card corner), 0 alone on the
+  island and the camera island, where the island shell clips the card and keeps one even gap,
+  and 0 on every edge in
+  a grouped row and while the widget is wrapped around the camera (the host clips both square).
+  In a row every widget shares one top line, one bottom line and one gap to the divider: your
+  first row on the rectangle's top edge, your last row on its bottom edge, and one
+  `Spacer(minLength: 0)` between them for the extra height a taller neighbour gives the row,
+  never centring the composition in it (`minAPI` 1.21.0). The shelf's chrome already
+  inset the rectangle (17.5pt from the shell's walls and floor), so never add your own padding
+  or corner inset on top: it doubles the gap.
   Leading text, trailing `.monospacedDigit()` numbers, rows that span the
   full width, a header row of a 12pt symbol and a 12pt semibold title with the widget's control
   at its trailing end, `DroppySpacing` steps between rows. Declare the height the content
@@ -84,6 +91,19 @@ package pins; `droppykit update` moves both to the newest release. A build that 
   it. A HUD strip is handed the whole width across the housing: put its content at the two
   outer edges and nothing in the middle (`host.environment.notchGeometry.closedWidth` is the
   housing), the way the World Clock example's strip does. Never centre a strip.
+- **The camera island is the third shape.** The MacBook Pro with an OLED display has a camera
+  pill a few points below the edge instead of a notch (`notchGeometry.cutout` is
+  `.cameraIsland`, `closedWidth` × `closedHeight` the pill, 59 × 31 on the 16-inch,
+  `cutoutTopInset` its 8.5pt gap, `isHardwareNotch` true; `minAPI` 1.22.0 to read `cutout`,
+  `cutoutTopInset`, `compactRowHeight` or `compactShell`). Droppy is always the island there (`context.surface` is `.dynamicIsland`), sitting on
+  the pill: the host splits compact content into wings around it exactly as around a notch,
+  in a 31pt capsule, and clears it above every card and shelf. Never frame an accessory or a
+  strip to `DroppyLiveActivityMetrics.rowHeight`: read `rowHeight(on: notchGeometry)`, the row
+  the host really draws on that display (`notchGeometry.compactRowHeight`: a 32pt Air notch,
+  the pill, the island with the user's offset), and branch a compact picture on
+  `notchGeometry.compactShell` (`.notchWings`, `.islandCapsule`, `.islandWings`), never on
+  `isHardwareNotch`. A strip that keeps `closedWidth` free in its middle is right there
+  unchanged. Check every surface on the harness's Camera island stages.
 - **Droppy owns every motion around your surfaces; you animate only what you swap.** A live
   activity row and a HUD are mounted exactly like Droppy's own, so never put an entrance
   transition on the view a factory returns (it plays twice). A live activity is compact only:
@@ -91,12 +111,52 @@ package pins; `droppykit update` moves both to the newest release. A build that 
   belong in the shelf widget. A glyph, label or control you swap while a surface is up takes
   `DroppyTransition.compactContent` in a wing or strip and `DroppyTransition.element` in a
   card, never a transition or spring of your own (`minAPI` 1.8.0).
-- **Buttons are Liquid Glass, Droppy's own.** `DroppyCircleButtonStyle` (20pt on an item,
-  24pt in a row) for an icon action, `DroppyQuietButtonStyle` and `DroppyAccentButtonStyle`
-  (`.small`) for labelled ones, `DroppyGlassButtonStyle` for a label with its own sizing.
-  Never a flat wash, a bordered chip or a white button of your own. A list with a control per
-  row wraps in `droppyFlatGlassControls()`. Only a live activity row's controls keep
-  `DroppyLiveActivityControlStyle`.
+- **Wrap the header row around the camera, notch or camera island.** Opt every solo widget
+  with a header row in:
+  `ShelfWidgetLayoutTraits(..., notchWrap: ShelfWidgetNotchWrapTraits(headerHeight:minimumBandWidth:))`
+  with the classic row's height. When `context.notchWrap` is set, draw the row with
+  `ShelfWidgetNotchWrapRow(wrap) { leading } trailing: { trailing }`, Droppy's own wrapped row
+  (each half pinned to its band, the row `wrap.headerHeight` tall; `minAPI` 1.22.0), and start
+  everything else under it.
+  Nothing between the halves (that is under the camera); a title that does not fit drops its
+  words (`ViewThatFits`). Never offset or pad the row yourself. When it is `nil`, draw the
+  classic header (`minAPI` 1.21.0). On the camera island (1.22.0) the context is an island card's
+  (`.dynamicIsland`, `usesIslandCurvature`) and still carries the wrap: read `notchWrap`, never
+  the surface.
+- **Every control in a widget is Droppy's flat wash.** `DroppyWashCircleButtonStyle` for a
+  symbol, `DroppyWashPillButtonStyle` for a label, `.neutral` for everything but the one action
+  the widget is for, which takes `.accent(color)`. 34pt alone on the shelf, 28pt beside another
+  widget and in the row wrapped beside the camera, 24pt for a small choice or a control inside
+  a list row (`DroppyWashSize`; `context.washControlSize` is the header's and the last row's for
+  the mount in hand, never a number of your own). A two- or three-way switch is
+  `DroppyWashChoiceButtonStyle` (Pomodoro's Focus / Break pills, `DroppyWashChoiceButtonStyle.spacing`
+  apart), never a segmented `Picker` or two buttons trading styles; a `Menu`'s label is
+  `.droppyWashCircle(diameter:...)`. Pass `context.usesAdaptiveForegrounds`. One family per
+  widget: never glass and wash together, never a bordered chip, a white button or a wash of
+  your own (`minAPI` 1.21.0 for the disc and the pill, 1.22.0 for `DroppyWashSize`,
+  `washControlSize`, the choice pills, the stretched pill and the menu disc). A widget with controls takes no clicks mid-spring:
+  `.allowsHitTesting(!context.isShelfTransitioning)` at its root.
+  Not buttons: tiles that are the widget's content keep their look, a live activity row keeps
+  `DroppyLiveActivityControlStyle`, and a settings pane uses native macOS controls.
+- **Your icon follows the user's icon style by itself.** Droppy draws the compiled icon in
+  Default, Clear or Tinted, light or dark; design its `dark` and `tinted` fills in Icon
+  Composer and change nothing in code. A view that must match reads the `\.droppyIconStyle`
+  environment value and falls back to `DroppyIconStyleObserver.shared.style` (`minAPI` 1.21.0).
+- **The menu bar extra is Droppy's.** Conform to `MenuBarExtraProviding` and never create an
+  `NSStatusItem` yourself: Droppy shows the extra as a tile in its Command Center (the panel
+  under Droppy's menu bar icon) and cannot order, hide or remove an item it did not create.
+  `makeMenuBarExtra()` is called again whenever the droplet's `objectWillChange` fires or one
+  of its `host.preferences` keys changes, so a "Show in Command Center" switch applies at
+  once; return `nil` to take the tile away.
+- **What you offer follows a broadcast, never a relaunch.** `widgetDescriptors`, and the
+  `expandedSurfaceSize` of a surface that is up, are read again whenever the droplet's
+  `objectWillChange` fires or one of its `host.preferences` keys changes, at most about four
+  times a second. A widget can stay out of the list until it is configured and appear the
+  moment it is; one you stop declaring leaves the shelf and keeps the user's placement. State
+  in another object (a model, a session) must forward its `objectWillChange` to the droplet's
+  own or be stored in `host.preferences`: Droppy hears nothing else. A presented surface keeps
+  the descriptor it was presented with, and a broadcast never dismisses it, so dismiss it
+  before you take its provider away.
 - **Everything `activate(host:)` starts, `deactivate()` stops.** Timers, observers, tasks,
   connections. Swift cannot unload code, so anything left running runs until Droppy
   relaunches.
@@ -214,3 +274,113 @@ the merge request; when a maintainer merges it, the pipeline builds, signs and p
 it. `droppykit submit --print` shows the plan without doing it (needs `glab`, signed in).
 Opening the merge request means accepting the Droplet developer terms at
 https://getdroppy.app/droplet-developer-terms.
+
+## Before `droppykit submit`
+
+`droppykit new` filled these in so the package builds and validates from the
+start. Every one is replaced before `droppykit submit`: the Store's checks
+refuse a submission that still carries them, or review sends it back. Ask the
+user for what only they can give (their name, their mark, what the droplet is
+for) instead of inventing it. The icon is the one placeholder that stays (see
+"The icon" below).
+
+- `Assets/Creator.png`: their own square mark, 256px or more, not rounded. The
+  scaffold's blue disc is refused byte for byte.
+- `droplet.json`: `summary` (the scaffold's "One line about..." is refused),
+  `description`, `category`, `creator.name` and `creator.url`.
+- `id`: permanent from the first publish. Check now that it names the product
+  (a droplet called Freelancy is `freelancy`); renaming later is impossible.
+- `CHANGELOG.md`: the first entry says what the droplet does, in past-tense
+  bullets under `## [1.0.0] - date`. Never only "First release.".
+- `README.md`: the opening sentence and every section that says what goes in
+  it, rewritten for the person deciding whether to install the droplet; leave
+  out a section that does not apply. No developer checklist in it.
+- The folder holds only what the Store takes: `droplet.json`, `Package.swift`,
+  `Sources/`, `Assets/`, `CHANGELOG.md`, `README.md`. No `Tests/` folder or
+  `.testTarget`, no scripts, no extra Markdown. `Package.swift` keeps one
+  dynamic library, the `OpenchamberHarness` executable and DroppyKit as its
+  only dependency, with no plugins, macros, binary targets, other executables
+  or `unsafeFlags`. `droppykit submit` leaves the `.icon`, `.gitignore`,
+  `Package.resolved`, `.build/`, shots and these agent files behind on its own.
+
+## The icon
+
+Full text: `/Users/josuegalre/projects/personal/droppykit/Sources/DroppyKit/Documentation.docc/Icons.md`.
+
+- Jordy designs every Store droplet's icon. `Openchamber.icon` is a
+  placeholder for the harness and the Playground: leave it exactly as
+  `droppykit new` wrote it, and never generate, draw or replace an icon.
+- `droppykit submit` leaves it out of the merge request. An idea for the icon
+  goes in the merge request's Icon concept section: a sentence, a reference
+  sketch or an SF Symbol to start from, never another company's logo.
+- Glyphs and images inside the droplet's own UI are the developer's to make.
+
+## Settings panes: what review sends back
+
+Full rules: `/Users/josuegalre/projects/personal/droppykit/Sources/DroppyKit/Documentation.docc/SettingsPanes.md`,
+"The rules, in one place".
+
+- Root in `DropletSettingsPane`; its content is cards and
+  `DropletSettingsSection`s straight inside, never a `VStack`.
+- No `DropletSettingsDivider` in a native pane.
+- Section headers are `settingsSectionHeader("Title")`, never
+  `Text("Title").font(.headline)`.
+- A boolean is a `DropletToggleRow`, never a two-option picker or a segmented
+  control.
+- A glyph (`icon:`) on every row of a card or on none.
+- A subtitle is one short sentence.
+- Buttons are `.bordered`, `.borderedProminent` or `.borderless`. The shelf's
+  glass styles (`DroppyGlassButtonStyle`, `DroppyQuietButtonStyle`,
+  `DroppyAccentButtonStyle`, `DroppyCircleButtonStyle`) never go on a settings
+  page.
+- Native `TextField` and `SecureField`, sentence case everywhere, and no page
+  header of your own.
+
+## Shelf widget height
+
+`context.contentInsets` is 8 on every edge for a solo card under the notch
+(DroppyKit 1.20.1), and 0 on every edge for a solo card on the island and the
+camera island, in a grouped row and while the widget is wrapped around the
+camera (1.21.0; the host clips those last two square). The declared height
+includes the insets: `.fixed(150)` leaves 134 points for content alone under
+the notch, and a grouped row hands the card the declared height less those 16
+points, so its content keeps the same 134. Declare the content's height plus
+the insets, and pad with `context.contentInsets` only, never a fixed number.
+Check the shot of every size: a clipped last row is this.
+
+## Good citizen
+
+Full rules, with code for each: `/Users/josuegalre/projects/personal/droppykit/Sources/DroppyKit/Documentation.docc/GoodCitizen.md`.
+
+- Work only while visible. Refresh in a `.task` on the widget's root view, or
+  while `host.shelf.isExpanded` (`shelf-read`, observe `host.shelf.didChange`).
+  `host.installState.state.activeWidgetIDs` lists your widgets on the user's
+  Custom Shelf in Droppy after 16.0.1, and `host.installState.statePublisher`
+  fires when one is placed or removed. Droppy 16.0.1 and earlier (Playground
+  1.0.27 and earlier) report it empty, so never treat empty as "not placed".
+- Never block the main actor: file, Accessibility and process I/O go on a
+  dispatch queue of your own, never on Swift's cooperative threads either.
+- Run a `Process` with a `terminationHandler`, output read while it runs, a
+  timeout, and `kill(-pid, SIGTERM)` for the whole process group on timeout and
+  in `deactivate()`. Never `waitUntilExit()` on the main actor.
+- A keyboard event tap runs on its own thread and run loop, never the main run
+  loop. A plain hotkey goes through `host.shortcuts` instead.
+- Anything that takes over (a global shortcut over a system one, intercepting
+  a key, a shelf takeover), costs battery (scanning, polling), pins the notch
+  (a live activity that stays) or sends data starts off, and the user switches
+  it on. No preset location or guessed account.
+- Secrets (API keys, tokens, passwords, OTP seeds) go in the Keychain, never in
+  `host.preferences`, which is plain `UserDefaults`.
+- Read only your own container (`host.environment.containerDirectory`) and
+  files the user hands you. Never another app's or droplet's data.
+- English first: manifest, changelog, README and default strings in English,
+  other languages as localizations chosen from
+  `Bundle.main.preferredLocalizations`. Whole localizable sentences with
+  placeholders, never concatenated fragments.
+- Never create an `NSStatusItem`; conform to `MenuBarExtraProviding` with the
+  `menu-bar` capability.
+- Credit third-party code, artwork, sounds and data in the README's Credits
+  section with their licence, keep their licence headers, and use nothing
+  under the GPL or AGPL.
+- No other company's logo or mark anywhere in the droplet, and no other
+  company's name as the droplet's name.

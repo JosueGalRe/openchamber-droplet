@@ -338,20 +338,20 @@ struct OpenchamberWidget: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            WidgetHeader(status: status) {
+            WidgetHeader(status: status, wrap: context.notchWrap) {
                 if droplet.presenting {
-                    Button { droplet.setPresenting(false) } label: {
-                        Image(systemName: "eye.slash").font(.system(size: 10, weight: .semibold))
-                    }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
-                    .help("Commands and messages are hidden. Click to show them.")
-                    .accessibilityLabel("Show commands and messages")
+                    // A mode that is on takes the accent.
+                    Button { droplet.setPresenting(false) } label: { Image(systemName: "eye.slash") }
+                        .buttonStyle(DroppyWashCircleButtonStyle(diameter: DroppyWashSize.row, tone: .accent(.orange),
+                                                                 usesAdaptiveForegrounds: context.usesAdaptiveForegrounds))
+                        .help("Commands and messages are hidden. Click to show them.")
+                        .accessibilityLabel("Show commands and messages")
                 }
-                PageSwitch(droplet: droplet)
+                PageSwitch(droplet: droplet, context: context)
             }
                 .padding(.bottom, DroppySpacing.smd)
             if droplet.connection == .noServers {
-                NoServersMessage(droplet: droplet)
+                NoServersMessage(droplet: droplet, context: context)
                 Spacer(minLength: 0)
             } else if droplet.tab == .usage {
                 UsageRings(droplet: droplet, context: context)
@@ -361,6 +361,7 @@ struct OpenchamberWidget: View {
         }
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .allowsHitTesting(!context.isShelfTransitioning)
     }
 
     private var status: HeaderStatus {
@@ -371,7 +372,8 @@ struct OpenchamberWidget: View {
         switch droplet.phase {
         case let .waiting(count):
             let running = busy > 0 && !context.isNarrow ? " · \(busy) running" : ""
-            return HeaderStatus(symbol: "hand.raised.fill", title: (context.isNarrow ? "Waiting" : "\(count) waiting") + running, tint: .orange)
+            return HeaderStatus(symbol: "hand.raised.fill", title: (context.isNarrow ? "Waiting" : "\(count) waiting") + running, tint: .orange,
+                                shortTitle: "\(count) waiting")
         case .working:
             return HeaderStatus(symbol: "play.fill", title: busy == 1 ? "Working" : "\(busy) running")
         case .retrying:
@@ -390,52 +392,77 @@ struct HeaderStatus: Equatable {
     var symbol: String
     var title: String
     var tint: Color = AdaptiveColors.notchSurfaceSecondaryText
+    /// What the title keeps beside the camera when the whole of it does not fit.
+    var shortTitle: String? = nil
 }
 
 private struct WidgetHeader<Trailing: View>: View {
     let status: HeaderStatus
+    /// The bands beside the camera, when the host wrapped the widget around it.
+    var wrap: ShelfWidgetNotchWrap? = nil
     @ViewBuilder let trailing: Trailing
 
     var body: some View {
-        HStack(spacing: DroppySpacing.xsm) {
-            Image(systemName: status.symbol).font(.system(size: 11, weight: .semibold))
-            Text(status.title)
-                .font(.system(size: 12, weight: .semibold))
-                .monospacedDigit()
-                .lineLimit(1)
-            Spacer(minLength: DroppySpacing.sm)
-            trailing
+        Group {
+            if let wrap {
+                ShelfWidgetNotchWrapRow(wrap) {
+                    // The title drops its words before it reaches the camera.
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: DroppySpacing.xsm) { symbol; title(status.title) }
+                        if let short = status.shortTitle {
+                            HStack(spacing: DroppySpacing.xsm) { symbol; title(short) }
+                        }
+                        symbol
+                    }
+                } trailing: {
+                    HStack(spacing: DroppyWashChoiceButtonStyle.spacing) { trailing }
+                }
+            } else {
+                HStack(spacing: DroppySpacing.xsm) {
+                    symbol
+                    title(status.title)
+                    Spacer(minLength: DroppySpacing.sm)
+                    trailing
+                }
+                .frame(height: Self.height)
+            }
         }
         .foregroundStyle(status.tint)
-        .frame(height: 24)
+    }
+
+    /// The classic row: as tall as its controls, the choice pills.
+    static var height: CGFloat { DroppyWashChoiceButtonStyle.height }
+
+    private var symbol: some View {
+        Image(systemName: status.symbol).font(.system(size: 11, weight: .semibold))
+    }
+
+    private func title(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold))
+            .monospacedDigit()
+            .lineLimit(1)
     }
 }
 
-/// Two small discs in one track, Droppy's own circle buttons: the page that
-/// is showing is green, as in Agents, at a size that leaves the header room.
+/// Droppy's choice pills as two discs, Pomodoro's Focus / Break: the page
+/// that is showing is green, as in Agents.
 private struct PageSwitch: View {
     @ObservedObject var droplet: OpenchamberDroplet
+    let context: ShelfWidgetContext
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: DroppyWashChoiceButtonStyle.spacing) {
             segment(.sessions, symbol: "checklist", label: "Sessions")
             segment(.usage, symbol: "gauge.with.dots.needle.33percent", label: "Usage")
         }
-        .padding(2)
-        .background(AdaptiveColors.notchSurfaceCardFill, in: Capsule())
     }
 
     private func segment(_ tab: OpenchamberDroplet.WidgetTab, symbol: String, label: String) -> some View {
         let selected = droplet.tab == tab
-        return Button { droplet.select(tab) } label: {
-            Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
-        }
-        .buttonStyle(DroppyCircleButtonStyle(
-            size: 20,
-            destructive: false,
-            solidFill: selected ? Color.green.opacity(0.24) : Color.clear,
-            foregroundColorOverride: selected ? .green : AdaptiveColors.notchSurfaceTertiaryText
-        ))
+        return Button { droplet.select(tab) } label: { Image(systemName: symbol) }
+        .buttonStyle(DroppyWashChoiceButtonStyle(isSelected: selected, accent: .green, isIconOnly: true,
+                                                 usesAdaptiveForegrounds: context.usesAdaptiveForegrounds))
         .help(label)
         .accessibilityLabel(label)
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -457,21 +484,21 @@ private struct SessionsPage: View {
     var body: some View {
         let busy = state.busySessionIDs
         if let permission = state.permissions.first {
-            ApprovalView(droplet: droplet, permission: permission, compact: context.isNarrow)
+            ApprovalView(droplet: droplet, permission: permission, context: context)
             let others = busy.filter { $0 != permission.sessionID }
             if !context.isNarrow, let other = others.last {
                 Spacer(minLength: DroppySpacing.sm)
                 SessionLine(droplet: droplet, sessionID: other, oneLine: true, more: others.count - 1) { droplet.openSession(other) }
             }
         } else if let form = state.forms.first {
-            FormView(droplet: droplet, form: form, compact: context.isNarrow)
+            FormView(droplet: droplet, form: form, context: context)
         } else if busy.count == 1 {
-            SessionHero(droplet: droplet, sessionID: busy[0], compact: context.isNarrow)
+            SessionHero(droplet: droplet, sessionID: busy[0], context: context)
         } else if busy.count > 1 {
             VStack(alignment: .leading, spacing: DroppySpacing.smd) {
                 if let open = expanded, busy.contains(open) {
                     let others = Array(busy.filter { $0 != open }.suffix(2).reversed())
-                    SessionHero(droplet: droplet, sessionID: open, compact: context.isNarrow,
+                    SessionHero(droplet: droplet, sessionID: open, context: context,
                                 lastTextLines: others.count > 1 ? 0 : 1) { expanded = nil }
                         .id(open)
                         .transition(DroppyTransition.element)
@@ -494,7 +521,7 @@ private struct SessionsPage: View {
                 if let open = expanded, !ids.contains(open) { expanded = nil }
             }
         } else if case let .failed(id) = droplet.phase {
-            SessionHero(droplet: droplet, sessionID: id, compact: context.isNarrow)
+            SessionHero(droplet: droplet, sessionID: id, context: context)
         } else {
             TodayPage(droplet: droplet, context: context)
         }
@@ -506,7 +533,8 @@ private struct SessionsPage: View {
 private struct SessionHero: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let sessionID: String
-    let compact: Bool
+    let context: ShelfWidgetContext
+    private var compact: Bool { context.isNarrow }
     /// Lines of the assistant's last words; a hero sharing the page gets fewer.
     var lastTextLines = 2
     /// Set when the hero was opened from the list: a tap folds it back, and
@@ -536,17 +564,13 @@ private struct SessionHero: View {
                 }
                 if !compact {
                     ElapsedText(since: activity.busySince, size: 13)
-                    Button { droplet.focus(sessionID) } label: {
-                        Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 9, weight: .semibold))
-                    }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 20))
-                    .help("Show the whole session")
-                    .accessibilityLabel("Show the whole session")
+                    Button { droplet.focus(sessionID) } label: { Image(systemName: "arrow.up.left.and.arrow.down.right") }
+                        .buttonStyle(DroppyWashCircleButtonStyle(diameter: DroppyWashSize.row, usesAdaptiveForegrounds: context.usesAdaptiveForegrounds))
+                        .help("Show the whole session")
+                        .accessibilityLabel("Show the whole session")
                 }
-                Button { droplet.openSession(sessionID) } label: {
-                    Image(systemName: "arrow.up.right").font(.system(size: 9, weight: .semibold))
-                }
-                .buttonStyle(DroppyCircleButtonStyle(size: 20))
+                Button { droplet.openSession(sessionID) } label: { Image(systemName: "arrow.up.right") }
+                .buttonStyle(DroppyWashCircleButtonStyle(diameter: DroppyWashSize.row, usesAdaptiveForegrounds: context.usesAdaptiveForegrounds))
                 .help("Open in OpenChamber")
                 .accessibilityLabel("Open in OpenChamber")
             }
@@ -820,12 +844,12 @@ struct ContextMeter: View {
 private struct ApprovalView: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let permission: PendingPermission
-    let compact: Bool
+    let context: ShelfWidgetContext
 
     var body: some View {
         let session = droplet.state.sessions[permission.sessionID]
         let command = permission.resources.joined(separator: "\n")
-        if compact {
+        if context.isNarrow {
             VStack(alignment: .leading, spacing: DroppySpacing.xs) {
                 Text(session?.title ?? "A session")
                     .font(.system(size: 14, weight: .semibold))
@@ -837,12 +861,11 @@ private struct ApprovalView: View {
                 Spacer(minLength: DroppySpacing.sm)
                 HStack(spacing: DroppySpacing.xsm) {
                     Button("Allow once") { droplet.reply(to: permission, decision: "once") }
-                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                        .buttonStyle(wash(.accent(.orange)))
                     Spacer(minLength: 0)
                     Button("Reject") { droplet.reply(to: permission, decision: "reject") }
-                        .buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                        .buttonStyle(wash(.neutral))
                 }
-                .frame(height: 28)
             }
         } else {
             VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
@@ -866,11 +889,11 @@ private struct ApprovalView: View {
                     .truncationMode(.middle)
                 HStack(spacing: DroppySpacing.xsm) {
                     Button("Allow once") { droplet.reply(to: permission, decision: "once") }
-                        .buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                        .buttonStyle(wash(.accent(.orange)))
                     Button("Always") { droplet.reply(to: permission, decision: "always") }
-                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                        .buttonStyle(wash(.neutral))
                     Button("Let it run 15m") { droplet.letRun(permission) }
-                        .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                        .buttonStyle(wash(.neutral))
                         .help("Allow this, and everything it asks for the next 15 minutes")
                     Spacer(minLength: 0)
                     if droplet.state.pendingCount > 1 {
@@ -880,12 +903,19 @@ private struct ApprovalView: View {
                             .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                     }
                     Button("Reject") { droplet.reply(to: permission, decision: "reject") }
-                        .buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                        .buttonStyle(wash(.neutral))
                 }
             }
             .padding(DroppySpacing.smd)
             .background(AdaptiveColors.notchSurfaceCardFill, in: RoundedRectangle(cornerRadius: DroppyRadius.medium, style: .continuous))
         }
+    }
+
+    /// Allowing is what the widget is for; every other answer is neutral. The
+    /// answers are the widget's last row when narrow, a row inside the card when not.
+    private func wash(_ tone: DroppyWashTone) -> DroppyWashPillButtonStyle {
+        DroppyWashPillButtonStyle(height: context.isNarrow ? context.washControlSize : DroppyWashSize.row,
+                                  tone: tone, usesAdaptiveForegrounds: context.usesAdaptiveForegrounds)
     }
 
     /// **Run** `swift build`: the verb in the waiting orange, then what it acts on.
@@ -905,13 +935,13 @@ private struct ApprovalView: View {
 private struct FormView: View {
     @ObservedObject var droplet: OpenchamberDroplet
     let form: PendingForm
-    let compact: Bool
+    let context: ShelfWidgetContext
 
     var body: some View {
         let session = droplet.state.sessions[form.sessionID]
         VStack(alignment: .leading, spacing: DroppySpacing.xs) {
             Text(Formatting.inlineMarkdown(form.title))
-                .font(.system(size: compact ? 14 : 15, weight: .semibold))
+                .font(.system(size: context.isNarrow ? 14 : 15, weight: .semibold))
                 .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                 .lineLimit(2)
             Text(session.map { "\($0.title) · \($0.project)" } ?? "A session asks")
@@ -923,8 +953,7 @@ private struct FormView: View {
                 to: form,
                 pick: { droplet.answer(form, with: $0) },
                 openChamber: { droplet.openSession(form.sessionID) }
-            ))
-            .frame(height: 28)
+            ), wash: context)
         }
     }
 }
@@ -1083,12 +1112,13 @@ private struct WidgetMessage: View {
 
 private struct NoServersMessage: View {
     let droplet: OpenchamberDroplet
+    let context: ShelfWidgetContext
 
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             WidgetMessage(text: "OpenChamber Desktop isn't set up on this Mac yet.")
             Button("Open settings") { droplet.openSettings() }
-                .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                .buttonStyle(DroppyWashPillButtonStyle(height: context.washControlSize, usesAdaptiveForegrounds: context.usesAdaptiveForegrounds))
         }
     }
 }
@@ -2027,18 +2057,29 @@ struct HiddenWhilePresenting: View {
 /// A card's decisions in a row, leading, the way Droppy's own cards lay them out.
 struct NoticeActions: View {
     let actions: [NoticeAction]
+    /// In a shelf widget, whose controls are the wash: the accent stays the
+    /// accent and every other answer is neutral. A HUD card keeps the glass.
+    var wash: ShelfWidgetContext? = nil
 
     var body: some View {
         HStack(spacing: DroppySpacing.xsm) {
             ForEach(actions.indices, id: \.self) { index in
                 let action = actions[index]
-                switch action.role {
-                case .accent:
-                    Button(action.title, action: action.run).buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
-                case .quiet:
-                    Button(action.title, action: action.run).buttonStyle(DroppyQuietButtonStyle(size: .small))
-                case .destructive:
-                    Button(action.title, action: action.run).buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                if let wash {
+                    Button(action.title, action: action.run).buttonStyle(DroppyWashPillButtonStyle(
+                        height: wash.washControlSize,
+                        tone: action.role == .accent ? .accent(.orange) : .neutral,
+                        usesAdaptiveForegrounds: wash.usesAdaptiveForegrounds
+                    ))
+                } else {
+                    switch action.role {
+                    case .accent:
+                        Button(action.title, action: action.run).buttonStyle(DroppyAccentButtonStyle(color: .orange, size: .small))
+                    case .quiet:
+                        Button(action.title, action: action.run).buttonStyle(DroppyQuietButtonStyle(size: .small))
+                    case .destructive:
+                        Button(action.title, action: action.run).buttonStyle(DroppyQuietButtonStyle(size: .small, destructive: true))
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -2102,51 +2143,18 @@ struct MenuBarSummary: View {
             }
         }
         .foregroundStyle(AdaptiveColors.primaryTextAuto)
-        // A menu item's own view brings no inset: this is the menu's text margin.
+        // The Command Center's detail brings no inset of its own.
         .padding(.horizontal, DroppySpacing.mdl)
         .padding(.vertical, DroppySpacing.xs)
         .frame(minWidth: 260, alignment: .leading)
         .fixedSize(horizontal: false, vertical: true)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { height = $0 }
-        .background(MenuItemFitter(height: height))
     }
-
-    @State private var height: CGFloat = 0
 
     /// `1 needs you · 3 running`: the whole state, so the list under it is not read as all waiting.
     private var header: String {
         guard case let .waiting(count) = droplet.phase else { return OpenchamberDroplet.summary(of: droplet.phase, now: Date()) }
         let busy = droplet.state.busySessionIDs.count
         return (["\(count) \(count == 1 ? "needs" : "need") you"] + (busy > 0 ? ["\(busy) running"] : [])).joined(separator: " · ")
-    }
-}
-
-/// Droppy mounts a menu bar extra's content in one menu item a row (24 points)
-/// high, so anything taller is centred and clipped. Once the content is in the
-/// menu this grows that item to the content's height.
-/// shortcut: works around the host's sizing (Droppy 16.2 beta, Playground 1.0.29); drop it once Droppy sizes the item itself.
-private struct MenuItemFitter: NSViewRepresentable {
-    let height: CGFloat
-
-    func makeNSView(context: Context) -> Probe { Probe() }
-
-    func updateNSView(_ probe: Probe, context: Context) {
-        probe.height = height
-        probe.fit()
-    }
-
-    final class Probe: NSView {
-        var height: CGFloat = 0
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            fit()
-        }
-
-        func fit() {
-            guard height > 0, let view = enclosingMenuItem?.view, abs(view.frame.height - height) > 0.5 else { return }
-            view.setFrameSize(NSSize(width: view.frame.width, height: height))
-        }
     }
 }
 

@@ -12,7 +12,7 @@ let package = Package(
         .library(name: "Openchamber", type: .dynamic, targets: ["Openchamber"])
     ],
     dependencies: [
-        .package(url: "https://gitlab.com/droppyformac1/droppykit.git", from: "1.6.0")
+        .package(url: "https://gitlab.com/droppyformac1/droppykit.git", from: "1.22.0")
     ],
     targets: [
         .target(
