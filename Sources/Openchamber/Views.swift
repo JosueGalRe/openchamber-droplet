@@ -490,7 +490,7 @@ private struct SessionsPage: View {
                 Spacer(minLength: DroppySpacing.sm)
                 SessionLine(droplet: droplet, sessionID: other, oneLine: true, more: others.count - 1) { droplet.openSession(other) }
             }
-        } else if let form = state.forms.first {
+        } else if let form = state.forms.first ?? state.pages.first {
             FormView(droplet: droplet, form: form, context: context)
         } else if busy.count == 1 {
             SessionHero(droplet: droplet, sessionID: busy[0], context: context)
@@ -2114,9 +2114,9 @@ struct MenuBarSummary: View {
 
     var body: some View {
         let state = droplet.state
-        let waiting = Set(state.permissions.map(\.sessionID) + state.forms.map(\.sessionID))
+        let waiting = Set(state.waitingSessionIDs)
         // What needs you first, then the rest of what is running.
-        let ids = (state.permissions.map(\.sessionID) + state.forms.map(\.sessionID) + state.busySessionIDs)
+        let ids = (state.waitingSessionIDs + state.busySessionIDs)
             .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
         VStack(alignment: .leading, spacing: DroppySpacing.xs) {
             Text(verbatim: header)

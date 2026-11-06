@@ -240,7 +240,7 @@ enum ExecutionOutcome: String, Equatable, Sendable {
 enum ActivityEvent: Equatable, Sendable {
     /// `/api/sessions/status`: replaces what is busy, with when each turn
     /// started, and what is pending.
-    case seeded(busy: [String: Date], permissions: [PendingPermission], forms: [PendingForm])
+    case seeded(busy: [String: Date], permissions: [PendingPermission], forms: [PendingForm], pages: [PendingForm] = [])
     case sessionsListed([SessionInfo])
     case executionStarted(sessionID: String, at: Date)
     /// `error` is OpenCode's, as `ProviderAuthError: token expired`, on a failure.
@@ -275,6 +275,9 @@ enum ActivityEvent: Equatable, Sendable {
     case permissionSettled(sessionID: String, requestID: String)
     case formCreated(PendingForm)
     case formSettled(sessionID: String, formID: String)
+    /// OpenChamber's `openchamber:page-waiting` and `openchamber:page-settled`.
+    case pageWaiting(PendingForm)
+    case pageSettled(sessionID: String, pageID: String)
     /// OpenChamber's own `openchamber:session-status`, the backstop for a
     /// session whose execution events were missed while disconnected.
     case statusChanged(sessionID: String, busy: Bool, at: Date)
@@ -290,10 +293,10 @@ extension ActivityEvent {
              let .textEnded(id, _), let .textStarted(id), let .textStreamed(id, _), let .stepEnded(id, _),
              let .compaction(id, _), let .promptQueued(id, _, _), let .promptDelivered(id, _, _), let .permissionSettled(id, _),
              let .reasoningStarted(id), let .reasoningStreamed(id, _), let .reasoningEnded(id, _),
-             let .formSettled(id, _), let .statusChanged(id, _, _), let .sessionDeleted(id), let .heard(id):
+             let .formSettled(id, _), let .pageSettled(id, _), let .statusChanged(id, _, _), let .sessionDeleted(id), let .heard(id):
             return id
         case let .permissionAsked(permission): return permission.sessionID
-        case let .formCreated(form): return form.sessionID
+        case let .formCreated(form), let .pageWaiting(form): return form.sessionID
         case let .sessionChanged(change): return change.sessionID
         case .seeded, .sessionsListed, .branchChanged: return nil
         }
@@ -327,6 +330,10 @@ struct ActivityState: Equatable, Sendable {
     /// Oldest first: "approve the oldest" acts on `permissions.first`.
     var permissions: [PendingPermission] = []
     var forms: [PendingForm] = []
+    /// Pages and secret cards an agent shows in OpenChamber and waits on
+    /// (`openchamber_render` with `awaitAnswer`, `openchamber_secret`): only
+    /// OpenChamber can answer them, so they never carry a choice.
+    var pages: [PendingForm] = []
     /// The git branch each project is on, by directory.
     var branches: [String: String] = [:]
     /// Each project's name, by id, from `GET /api/project`.
@@ -338,7 +345,13 @@ struct ActivityState: Equatable, Sendable {
     /// How long a failure keeps the notch before it stands down on its own.
     static let failureTTL: TimeInterval = 10 * 60
 
-    var pendingCount: Int { permissions.count + forms.count }
+    var pendingCount: Int { permissions.count + forms.count + pages.count }
+
+    /// Sessions waiting on you, permissions first, each once.
+    var waitingSessionIDs: [String] {
+        var seen = Set<String>()
+        return (permissions.map(\.sessionID) + forms.map(\.sessionID) + pages.map(\.sessionID)).filter { seen.insert($0).inserted }
+    }
 
     /// Every server's state as one, for the notch. Each server keeps its own
     /// state so a seed from one never wipes another's pending requests.
@@ -349,6 +362,7 @@ struct ActivityState: Equatable, Sendable {
             result.activity.merge(state.activity) { current, _ in current }
             result.permissions += state.permissions
             result.forms += state.forms
+            result.pages += state.pages
             result.branches.merge(state.branches) { current, _ in current }
         }
         return result
@@ -379,6 +393,7 @@ struct ActivityState: Equatable, Sendable {
         let referenced = Set(activity.keys)
             .union(permissions.map(\.sessionID))
             .union(forms.map(\.sessionID))
+            .union(pages.map(\.sessionID))
         return referenced.subtracting(sessions.keys)
     }
 
@@ -408,7 +423,7 @@ struct ActivityState: Equatable, Sendable {
 
     mutating func apply(_ event: ActivityEvent) {
         switch event {
-        case let .seeded(busy, permissions, forms):
+        case let .seeded(busy, permissions, forms, pages):
             for (id, since) in busy { markBusy(id, since: since) }
             for (id, value) in activity where value.isBusy && busy[id] == nil {
                 activity[id]?.busySince = nil
@@ -416,6 +431,7 @@ struct ActivityState: Equatable, Sendable {
             }
             self.permissions = permissions
             self.forms = forms
+            self.pages = pages
 
         case let .sessionsListed(list):
             for var info in list {
@@ -553,6 +569,13 @@ struct ActivityState: Equatable, Sendable {
         case let .formSettled(sessionID, formID):
             forms.removeAll { $0.id == formID && $0.sessionID == sessionID }
 
+        case let .pageWaiting(page):
+            guard !pages.contains(where: { $0.id == page.id }) else { return }
+            pages.append(page)
+
+        case let .pageSettled(sessionID, pageID):
+            pages.removeAll { $0.id == pageID && $0.sessionID == sessionID }
+
         case let .statusChanged(id, busy, at):
             if busy {
                 markBusy(id, since: at)
@@ -566,6 +589,7 @@ struct ActivityState: Equatable, Sendable {
             activity[id] = nil
             permissions.removeAll { $0.sessionID == id }
             forms.removeAll { $0.sessionID == id }
+            pages.removeAll { $0.sessionID == id }
         }
     }
 
@@ -641,6 +665,17 @@ enum ActivityWire {
             let at = date(fromMilliseconds: properties["timestamp"]) ?? now
             // A busy status carries its turn's start once OpenChamber knows it.
             return .statusChanged(sessionID: id, busy: busy, at: busy ? date(fromMilliseconds: properties["turnStartedAt"]) ?? at : at)
+        }
+        if type == "openchamber:page-waiting" {
+            let properties = payload["properties"] as? [String: Any]
+            let page = properties?["page"] as? [String: Any] ?? [:]
+            return self.page(id: page["id"], sessionID: properties?["sessionID"], title: page["title"],
+                             directory: properties?["directory"] as? String).map(ActivityEvent.pageWaiting)
+        }
+        if type == "openchamber:page-settled" {
+            guard let properties = payload["properties"] as? [String: Any],
+                  let sessionID = properties["sessionID"] as? String, let pageID = properties["pageID"] as? String else { return nil }
+            return .pageSettled(sessionID: sessionID, pageID: pageID)
         }
 
         guard let data = payload["data"] as? [String: Any] else { return nil }
@@ -748,6 +783,7 @@ enum ActivityWire {
         }
         var permissions: [PendingPermission] = []
         var forms: [PendingForm] = []
+        var pages: [PendingForm] = []
         for (_, entry) in body["pending"] as? [String: [String: Any]] ?? [:] {
             for item in entry["permissions"] as? [[String: Any]] ?? [] {
                 if let permission = permission(from: item, directory: nil) { permissions.append(permission) }
@@ -755,8 +791,19 @@ enum ActivityWire {
             for item in entry["forms"] as? [[String: Any]] ?? [] {
                 if let form = form(from: item, directory: nil) { forms.append(form) }
             }
+            for item in entry["pages"] as? [[String: Any]] ?? [] {
+                if let page = page(id: item["id"], sessionID: item["sessionID"], title: item["title"], directory: nil) { pages.append(page) }
+            }
         }
-        return .seeded(busy: busy, permissions: permissions, forms: forms)
+        return .seeded(busy: busy, permissions: permissions, forms: forms, pages: pages)
+    }
+
+    /// A page or secret card waiting for the user, as a form only OpenChamber
+    /// can answer. A secret's title is what it asks for.
+    static func page(id: Any?, sessionID: Any?, title: Any?, directory: String?) -> PendingForm? {
+        guard let id = id as? String, let sessionID = sessionID as? String else { return nil }
+        let title = (title as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "A page waits for your answer"
+        return PendingForm(id: id, sessionID: sessionID, title: title, directory: directory)
     }
 
     /// One session record from `GET /api/session` or `GET /api/session/:id`.

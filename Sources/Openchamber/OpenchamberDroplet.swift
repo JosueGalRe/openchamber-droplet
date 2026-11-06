@@ -180,7 +180,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         }
         host.shortcuts.register(id: "open-waiting", title: "Open the OpenChamber session that needs you", defaultShortcut: nil) { [weak self] in
             guard let self else { return }
-            let waiting = self.state.permissions.first?.sessionID ?? self.state.forms.first?.sessionID ?? self.state.busySessionIDs.first
+            let waiting = self.state.waitingSessionIDs.first ?? self.state.busySessionIDs.first
             if let waiting { self.openSession(waiting) }
         }
         host.shortcuts.register(id: "voice-reply", title: "Talk to the OpenChamber session that needs you", defaultShortcut: nil) { [weak self] in
@@ -496,7 +496,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         if let id = event.sessionID { lastHeard[id] = now }
         // Nothing could be heard before the feed connected: a turn already
         // running when it did starts its quiet clock now, not at the turn's start.
-        if case let .seeded(busy, _, _) = event { for id in busy.keys { lastHeard[id] = now } }
+        if case let .seeded(busy, _, _, _) = event { for id in busy.keys { lastHeard[id] = now } }
         switch event {
         case .heard:
             return
@@ -611,6 +611,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 || server.activity.sessions[id] != nil
                 || server.activity.permissions.contains { $0.sessionID == id }
                 || server.activity.forms.contains { $0.sessionID == id }
+                || server.activity.pages.contains { $0.sessionID == id }
         }?.key
     }
 
@@ -786,7 +787,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// half hour, else the one that has run longest.
     var replyTarget: String? {
         if let focusedSessionID { return focusedSessionID }
-        if let waiting = state.permissions.first?.sessionID ?? state.forms.first?.sessionID { return waiting }
+        if let waiting = state.waitingSessionIDs.first { return waiting }
         let finished = state.activity
             .filter { state.sessions[$0.key]?.parentID == nil }
             .compactMap { id, activity in activity.finishedAt.map { (id, $0) } }
@@ -964,7 +965,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// What looks stuck now, and a card for each new one. A session waiting
     /// on you, retrying or compacting is not stuck.
     private func updateStuck(now: Date) {
-        let waiting = Set(state.permissions.map(\.sessionID) + state.forms.map(\.sessionID))
+        let waiting = Set(state.waitingSessionIDs)
         var next: [String: StuckReason] = [:]
         for id in state.busySessionIDs where !waiting.contains(id) {
             guard let activity = state.activity[id], activity.retry == nil, !activity.compacting else { continue }
@@ -1123,8 +1124,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         awayLog = []
         let minutes = Int(Date().timeIntervalSince(since) / 60)
         guard recapsAway, minutes >= 5, let host else { return }
-        var seen: Set<String> = []
-        let waiting = (state.permissions.map(\.sessionID) + state.forms.map(\.sessionID)).filter { seen.insert($0).inserted }
+        let waiting = state.waitingSessionIDs
         // The latest turn of each session.
         let ended = Dictionary(log.map { ($0.sessionID, $0) }) { _, latest in latest }.values
             .filter { !waiting.contains($0.sessionID) }
@@ -1433,14 +1433,16 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     }
 
     /// A card for each new question, up until it is answered. Forms can hold
-    /// any number of fields, so they are answered in OpenChamber.
+    /// any number of fields, and pages and secrets are drawn by OpenChamber,
+    /// so all but a one-pick form are answered there.
     private func announceNewForms() {
-        let current = Set(state.forms.map(\.id))
+        let asks = state.forms + state.pages
+        let current = Set(asks.map(\.id))
         for gone in announcedForms.subtracting(current) { host?.hud.dismiss(id: formHUDID(gone)) }
         announcedForms.formIntersection(current)
 
         guard showsQuestionCards, let host else { return }
-        for form in state.forms where !announcedForms.contains(form.id) {
+        for form in asks where !announcedForms.contains(form.id) {
             announcedForms.insert(form.id)
             if tab != .sessions { tab = .sessions }
             guard !openChamberIsInFront else { continue }
@@ -1565,7 +1567,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// The agent whose mascot the notch shows: the session that waits on you,
     /// else the one that has run longest.
     var leadProvider: String? {
-        let id = state.permissions.first?.sessionID ?? state.forms.first?.sessionID ?? state.busySessionIDs.first
+        let id = state.waitingSessionIDs.first ?? state.busySessionIDs.first
         return id.flatMap { state.sessions[$0]?.providerID }
     }
 
@@ -1588,7 +1590,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     var sessionDots: [Bool]? {
         let busy = state.busySessionIDs
         guard (2...4).contains(busy.count) else { return nil }
-        let waiting = Set(state.permissions.map(\.sessionID) + state.forms.map(\.sessionID))
+        let waiting = Set(state.waitingSessionIDs)
         return busy.map(waiting.contains)
     }
 

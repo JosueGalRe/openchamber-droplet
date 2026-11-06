@@ -271,6 +271,28 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(partial.calls.map(\.id) == ["c9"])
 }
 
+@Test func aPageOrSecretThatWaitsCountsAsWaiting() {
+    var state = ActivityState()
+    state.apply(ActivityWire.seed(from: [
+        "sessions": ["s1": ["status": "busy", "turnStartedAt": 1_800_000_000_000]],
+        "pending": ["s1": ["permissions": [], "forms": [], "pages": [["id": "call_1", "sessionID": "s1", "title": "Pick a layout"]]]],
+    ], now: t0))
+    #expect(state.pages.map(\.title) == ["Pick a layout"])
+    #expect(state.phase(at: t0) == .waiting(count: 1))
+    #expect(state.waitingSessionIDs == ["s1"])
+
+    // A secret card waits the same way; its label can be empty.
+    let secret: [String: Any] = ["type": "openchamber:page-waiting",
+                                 "properties": ["sessionID": "s2", "directory": "/r", "page": ["id": "call_2", "title": ""]]]
+    state.apply(ActivityWire.event(from: secret, now: t0)!)
+    #expect(state.pages.last == PendingForm(id: "call_2", sessionID: "s2", title: "A page waits for your answer", directory: "/r"))
+    #expect(ActivityState.merged([state]).phase(at: t0) == .waiting(count: 2))
+
+    state.apply(ActivityWire.event(from: ["type": "openchamber:page-settled", "properties": ["sessionID": "s1", "pageID": "call_1"]], now: t0)!)
+    #expect(state.pages.map(\.id) == ["call_2"])
+    #expect(state.waitingSessionIDs == ["s2"])
+}
+
 @Test func aRecoveredTurnGoesUnderWhatWasHeardLive() {
     var state = state(after: [
         wire("session.tool.input.started", ["sessionID": "s1", "id": "c3", "name": "shell"]),
