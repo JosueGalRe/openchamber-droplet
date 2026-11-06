@@ -1373,7 +1373,7 @@ private struct SessionDetail: View {
         }
         .padding(16)
         .frame(width: 340, alignment: .leading)
-        .onAppear { droplet.lookUpPrompt(forSession: sessionID) }
+        .onAppear { droplet.lookUpTurn(forSession: sessionID) }
     }
 
     private func block<Content: View>(_ label: String, @ViewBuilder content: () -> Content) -> some View {

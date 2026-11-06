@@ -379,6 +379,27 @@ actor OpenChamberClient {
         return (id, text)
     }
 
+    /// The session's latest turn from one page of its history. A page holds
+    /// every message of a turn with its tools' output, so a long turn's prompt
+    /// is asked for on its own.
+    func turn(sessionID: String, directory: String?) async throws -> RecoveredTurn {
+        let body = try await json("GET", "api/session/\(sessionID.urlPathEncoded)/message",
+                                  query: [URLQueryItem(name: "limit", value: "50"), URLQueryItem(name: "order", value: "desc")],
+                                  directory: directory)
+        var turn = ActivityWire.turn(from: (body as? [String: Any])?["data"] as? [[String: Any]] ?? [])
+        if turn.promptID == nil, let (id, text) = try await lastPrompt(sessionID: sessionID, directory: directory) {
+            turn.promptID = id
+            turn.prompt = text
+        }
+        return turn
+    }
+
+    /// Project names by id, which name OpenCode's worktrees.
+    func projects() async throws -> [String: String] {
+        let body = try await json("GET", "api/project")
+        return ActivityWire.projectNames(from: body as? [[String: Any]] ?? (body as? [String: Any])?["data"] as? [[String: Any]] ?? [])
+    }
+
     /// The branch a project is on, from `GET /api/vcs`; nil outside git.
     func branch(directory: String) async throws -> String? {
         let body = try await json("GET", "api/vcs", directory: directory) as? [String: Any]

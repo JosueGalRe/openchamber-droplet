@@ -142,7 +142,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// The same for the agent's thinking.
     private var pendingReasoning: [String: [String: String]] = [:]
     /// Sessions whose prompt was asked for, so a hover asks once.
-    private var promptLookups: Set<String> = []
+    private var turnLookups: Set<String> = []
     private var textFlush: Task<Void, Never>?
     private var focusPresentation: ExpandedSurfacePresentation?
     /// When each session last sent anything, and last moved a step on. Kept
@@ -329,7 +329,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         textFlush = nil
         pendingText = [:]
         pendingReasoning = [:]
-        promptLookups = []
+        turnLookups = []
         feeds = [:]
         usageRefreshes = [:]
         clients = [:]
@@ -388,13 +388,22 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
                 apply(try await client.seed(), from: server.id)
                 let sessions = try await client.recentSessions()
                 apply(.sessionsListed(sessions), from: server.id)
+                // Turns already running have steps and words the stream will not repeat.
+                for (id, activity) in serverStates[server.id]?.activity.activity ?? [:] where activity.isBusy {
+                    lookUpTurn(forSession: id)
+                }
+                let id = server.id
                 // OpenCode reads its catalog through a project; the most recent
                 // session's is one it has open. Without it, sessions show model ids.
                 if let directory = sessions.first?.directory, !directory.isEmpty {
-                    let id = server.id
                     Task { [weak self] in
                         if let models = try? await client.models(directory: directory) { self?.serverStates[id]?.models = models }
                     }
+                }
+                Task { [weak self] in
+                    guard let names = try? await client.projects() else { return }
+                    self?.serverStates[id]?.activity.learnProjects(names)
+                    self?.publish()
                 }
                 let stream = try await client.events(after: lastEventID)
                 setConnection(.live, for: server.id)
@@ -626,22 +635,22 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         catalogModel(forSession: id).flatMap { $0.context > 0 ? $0.context : nil }
     }
 
-    /// The prompt of a turn that began before the droplet was listening,
-    /// asked of the server once. Applied around `apply`: the answer is not
-    /// the session speaking, and must not reset its stuck clock.
-    func lookUpPrompt(forSession id: String) {
-        guard state.activity[id]?.prompt == nil, !promptLookups.contains(id),
+    /// A turn that began before the droplet was listening, asked of the
+    /// server once: what it asked, its calls and its latest words. Applied
+    /// around `apply`: the answer is not the session speaking, and must not
+    /// reset its stuck clock.
+    func lookUpTurn(forSession id: String) {
+        guard state.activity[id]?.prompt == nil, !turnLookups.contains(id),
               let serverID = serverID(forSession: id), let client = clients[serverID] else { return }
-        promptLookups.insert(id)
+        turnLookups.insert(id)
         let directory = state.sessions[id]?.directory
         Task {
             do {
-                guard let (messageID, text) = try await client.lastPrompt(sessionID: id, directory: directory),
-                      serverStates[serverID]?.activity.activity[id]?.prompt == nil else { return }
-                serverStates[serverID]?.activity.apply(.promptDelivered(sessionID: id, messageID: messageID, text: text))
+                let turn = try await client.turn(sessionID: id, directory: directory)
+                serverStates[serverID]?.activity.recover(turn, sessionID: id)
                 publish()
             } catch {
-                promptLookups.remove(id)
+                turnLookups.remove(id)
             }
         }
     }
@@ -1171,7 +1180,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
     /// session a reply would go to.
     private func clipboardTarget(for text: String) -> String? {
         let named = state.sessions.values
-            .filter { $0.parentID == nil && !$0.directory.isEmpty && (text.contains($0.directory) || !$0.isChat && text.contains("/\($0.project)/")) }
+            .filter { $0.parentID == nil && !$0.directory.isEmpty && (text.contains($0.directory) || !$0.isChat && text.contains("/\($0.folder)/")) }
             .max { lhs, rhs in
                 let a = state.activity[lhs.id], b = state.activity[rhs.id]
                 return (a?.isBusy == true ? 1 : 0, a?.finishedAt ?? .distantPast) < (b?.isBusy == true ? 1 : 0, b?.finishedAt ?? .distantPast)
@@ -1186,7 +1195,7 @@ public final class OpenchamberDroplet: NSObject, ObservableObject, Droplet {
         let path = (project as NSString).expandingTildeInPath
         let known = state.sessions.values.first {
             // A chat's folder is its own: a new session never goes into one by name.
-            path.hasPrefix("/") ? $0.directory == path : !$0.isChat && $0.project.caseInsensitiveCompare(project) == .orderedSame
+            path.hasPrefix("/") ? $0.directory == path : !$0.isChat && $0.folder.caseInsensitiveCompare(project) == .orderedSame
         }
         let directory = known?.directory ?? (path.hasPrefix("/") ? path : nil)
         let serverID = known.flatMap { serverID(forSession: $0.id) }

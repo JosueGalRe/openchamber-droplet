@@ -22,10 +22,14 @@ struct SessionInfo: Equatable, Sendable {
     var agent: String? = nil
     /// How hard the model reasons: `xhigh`, `medium`, `default`, …
     var variant: String? = nil
+    /// The project an OpenCode worktree belongs to, from the server's catalog.
+    var projectName: String? = nil
 
-    /// The folder name, which is how OpenChamber's sidebar names a project;
-    /// `Chat` for one of its chats, whose folder is only an id.
-    var project: String { isChat ? "Chat" : (directory as NSString).lastPathComponent }
+    /// How OpenChamber's sidebar names a project: its folder, the project's
+    /// for an OpenCode worktree, and `Chat` for one of its chats, whose folder is only an id.
+    var project: String { isChat ? "Chat" : projectName ?? folder }
+
+    var folder: String { (directory as NSString).lastPathComponent }
 
     /// One of OpenChamber's chats rather than a project: it gives each its
     /// own folder, `<chats root>/2026-10-24/session-<uuid>`, wherever the root is.
@@ -49,6 +53,15 @@ struct ToolCall: Equatable, Sendable {
     var mark: ToolMark
     /// The same in full, for the hover card: the path, every line of the command, the URL.
     var detail: String? = nil
+}
+
+/// A session's latest turn from its message history, as far back as one page reaches.
+struct RecoveredTurn: Equatable, Sendable {
+    var promptID: String?
+    var prompt: String?
+    /// Oldest first.
+    var calls: [ToolCall] = []
+    var lastText: String?
 }
 
 struct Retry: Equatable, Sendable {
@@ -316,6 +329,8 @@ struct ActivityState: Equatable, Sendable {
     var forms: [PendingForm] = []
     /// The git branch each project is on, by directory.
     var branches: [String: String] = [:]
+    /// Each project's name, by id, from `GET /api/project`.
+    var projectNames: [String: String] = [:]
 
     static let recentCallLimit = 12
     /// OpenChamber's own busy-to-idle cooldown (`SESSION_COOLDOWN_DURATION_MS`).
@@ -403,7 +418,10 @@ struct ActivityState: Equatable, Sendable {
             self.forms = forms
 
         case let .sessionsListed(list):
-            for info in list { sessions[info.id] = info }
+            for var info in list {
+                info.projectName = projectName(of: info.directory)
+                sessions[info.id] = info
+            }
 
         case let .executionStarted(id, at):
             var session = activity[id, default: SessionActivity()]
@@ -470,6 +488,7 @@ struct ActivityState: Equatable, Sendable {
                 info.variant = change.variant
             }
             if let agent = change.agent { info.agent = agent }
+            info.projectName = projectName(of: info.directory)
             // Only a session we know, or one being created, gets a record:
             // a rename of a session we never listed waits for the lookup.
             if sessions[change.sessionID] != nil || change.directory != nil { sessions[change.sessionID] = info }
@@ -555,6 +574,36 @@ struct ActivityState: Equatable, Sendable {
     private mutating func markBusy(_ id: String, since: Date) {
         let current = activity[id]?.busySince ?? since
         activity[id, default: SessionActivity()].busySince = min(current, since)
+    }
+
+    /// The server's project catalog, which names its OpenCode worktrees.
+    mutating func learnProjects(_ names: [String: String]) {
+        projectNames = names
+        for (id, info) in sessions {
+            let name = projectName(of: info.directory)
+            sessions[id]?.projectName = name
+        }
+    }
+
+    /// OpenCode keeps a project's worktrees in `<data>/worktree/<project id>/<name>`.
+    private func projectName(of directory: String) -> String? {
+        projectNames[((directory as NSString).deletingLastPathComponent as NSString).lastPathComponent]
+    }
+
+    /// A turn that began before the droplet was listening, as the server's
+    /// history has it, under whatever was heard live since.
+    mutating func recover(_ turn: RecoveredTurn, sessionID id: String) {
+        var session = activity[id, default: SessionActivity()]
+        let heard = Set(session.calls.map(\.id))
+        let earlier = turn.calls.filter { !heard.contains($0.id) }
+        session.calls = Array((earlier + session.calls).suffix(Self.recentCallLimit))
+        session.steps += earlier.count
+        if session.lastText == nil, session.liveText == nil { session.lastText = turn.lastText }
+        if session.prompt == nil, let prompt = turn.prompt {
+            session.promptID = turn.promptID
+            session.prompt = prompt
+        }
+        activity[id] = session
     }
 
     private mutating func upsertCall(sessionID: String, callID: String, _ update: (inout ToolCall) -> Void) {
@@ -728,6 +777,55 @@ enum ActivityWire {
             agent: record["agent"] as? String,
             variant: model?["variant"] as? String
         )
+    }
+
+    /// `GET /api/session/:id/message?order=desc`, newest first: the latest
+    /// turn back to the user message it answers, or as far as the page goes.
+    static func turn(from messages: [[String: Any]]) -> RecoveredTurn {
+        var turn = RecoveredTurn()
+        var calls: [ToolCall] = []
+        var began = false
+        walk: for message in messages {
+            switch message["type"] as? String {
+            case "user":
+                turn.promptID = message["id"] as? String
+                turn.prompt = message["text"] as? String
+                break walk
+            case "assistant":
+                began = true
+                for part in (message["content"] as? [[String: Any]] ?? []).reversed() {
+                    if part["type"] as? String == "text", turn.lastText == nil,
+                       let text = (part["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                        turn.lastText = text
+                    }
+                    guard part["type"] as? String == "tool", let id = part["id"] as? String else { continue }
+                    let state = part["state"] as? [String: Any] ?? [:]
+                    let input = state["input"] as? [String: Any] ?? [:]
+                    let mark: ToolMark = switch state["status"] as? String {
+                    case "completed": .succeeded
+                    case "error": .failed
+                    default: .running
+                    }
+                    calls.append(ToolCall(id: id, name: part["name"] as? String ?? "tool", target: target(of: input), mark: mark, detail: detail(of: input)))
+                }
+            default:
+                // An `idle` ends a turn: past the latest turn's own messages, the one before it.
+                if began { break walk }
+            }
+        }
+        turn.calls = calls.reversed()
+        return turn
+    }
+
+    /// `GET /api/project`: each project's id and the name of its folder.
+    static func projectNames(from projects: [[String: Any]]) -> [String: String] {
+        var names: [String: String] = [:]
+        for project in projects {
+            // `global` and other folderless projects are `/`.
+            guard let id = project["id"] as? String, let canonical = project["canonical"] as? String, canonical != "/" else { continue }
+            names[id] = (canonical as NSString).lastPathComponent
+        }
+        return names
     }
 
     /// What the context holds after a step: the server's `total` for the last

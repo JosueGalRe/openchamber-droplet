@@ -223,6 +223,74 @@ private func wire(_ type: String, at date: Date = t0, directory: String = "/User
     #expect(project.project == "session-replay")
 }
 
+@Test func anOpenCodeWorktreeIsNamedAfterItsProject() {
+    let names = ActivityWire.projectNames(from: [
+        ["id": "27b6", "canonical": "/home/me/projects/dc-ada"],
+        ["id": "global", "canonical": "/"],
+    ])
+    #expect(names == ["27b6": "dc-ada"])
+
+    var state = ActivityState()
+    let worktree = SessionInfo(id: "w", title: "T", directory: "/home/me/.local/share/opencode/worktree/27b6/bugfix-ADAREP-378", parentID: nil)
+    state.apply(.sessionsListed([worktree, SessionInfo(id: "p", title: "T", directory: "/home/me/projects/dc-ada-be", parentID: nil)]))
+    #expect(state.sessions["w"]?.project == "bugfix-ADAREP-378")
+    // The catalog can arrive after the sessions, and names the ones already listed.
+    state.learnProjects(names)
+    #expect(state.sessions["w"]?.project == "dc-ada")
+    #expect(state.sessions["w"]?.folder == "bugfix-ADAREP-378")
+    #expect(state.sessions["p"]?.project == "dc-ada-be")
+    state.apply(.sessionsListed([worktree]))
+    #expect(state.sessions["w"]?.project == "dc-ada")
+}
+
+@Test func aTurnIsReadBackFromItsHistoryNewestFirst() {
+    func tool(_ id: String, _ status: String, _ input: [String: Any]) -> [String: Any] {
+        ["type": "tool", "id": id, "name": "shell", "state": ["status": status, "input": input]]
+    }
+    let turn = ActivityWire.turn(from: [
+        ["type": "idle", "id": "m5"],
+        ["type": "assistant", "id": "m4", "content": [["type": "text", "text": "Done. "], tool("c3", "running", ["command": "pnpm lint"])]],
+        ["type": "assistant", "id": "m3", "content": [["type": "reasoning", "text": "…"], tool("c1", "completed", ["filePath": "/r/a.ts"]), tool("c2", "error", ["command": "pnpm test"])]],
+        ["type": "user", "id": "m2", "text": "Fix the table"],
+        ["type": "assistant", "id": "m1", "content": [tool("c0", "completed", [:])]],
+    ])
+    #expect(turn.promptID == "m2")
+    #expect(turn.prompt == "Fix the table")
+    #expect(turn.calls.map(\.id) == ["c1", "c2", "c3"])
+    #expect(turn.calls.map(\.mark) == [.succeeded, .failed, .running])
+    #expect(turn.calls.first?.target == "a.ts")
+    #expect(turn.lastText == "Done.")
+
+    // Without its user message in reach, the turn stops at the one before it.
+    let partial = ActivityWire.turn(from: [
+        ["type": "assistant", "id": "m9", "content": [tool("c9", "running", [:])]],
+        ["type": "idle", "id": "m8"],
+        ["type": "assistant", "id": "m7", "content": [tool("c7", "completed", [:])]],
+    ])
+    #expect(partial.promptID == nil)
+    #expect(partial.calls.map(\.id) == ["c9"])
+}
+
+@Test func aRecoveredTurnGoesUnderWhatWasHeardLive() {
+    var state = state(after: [
+        wire("session.tool.input.started", ["sessionID": "s1", "id": "c3", "name": "shell"]),
+        wire("session.tool.success", ["sessionID": "s1", "id": "c3"]),
+        wire("session.text.ended", ["sessionID": "s1", "text": "Heard live."]),
+    ])
+    state.recover(RecoveredTurn(promptID: "m2", prompt: "Fix the table", calls: [
+        ToolCall(id: "c1", name: "read", target: "a.ts", mark: .succeeded),
+        ToolCall(id: "c3", name: "shell", target: nil, mark: .running),
+    ], lastText: "Older words."), sessionID: "s1")
+
+    let activity = state.activity["s1"]
+    #expect(activity?.calls.map(\.id) == ["c1", "c3"])
+    #expect(activity?.calls.last?.mark == .succeeded)
+    #expect(activity?.steps == 2)
+    #expect(activity?.lastText == "Heard live.")
+    #expect(activity?.prompt == "Fix the table")
+    #expect(activity?.promptID == "m2")
+}
+
 @Test func theRunnerNamesModelProfileAndServer() {
     let session = SessionInfo(id: "s1", title: "T", directory: "/r", parentID: nil, providerID: "kiro", modelID: "kiro/claude-sonnet-4.5", agent: "build")
     #expect(Formatting.runner(of: session, server: "devbox") == "claude-sonnet-4.5 · Build · devbox")
