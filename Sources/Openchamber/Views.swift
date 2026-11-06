@@ -1441,10 +1441,7 @@ struct SessionFocus: View {
         let session = droplet.state.sessions[id]
         let activity = droplet.state.activity[id] ?? SessionActivity()
         let live = activity.liveText.flatMap { $0.isEmpty ? nil : $0 }
-        let meta = [
-            Formatting.runner(of: session, model: droplet.modelName(forSession: id), server: droplet.serverLabel(forSession: id)),
-            session?.project,
-        ].compactMap { $0 }.joined(separator: " · ")
+        let runner = Formatting.runner(of: session, model: droplet.modelName(forSession: id), server: droplet.serverLabel(forSession: id))
         let branch = session.flatMap { droplet.state.branches[$0.directory] }
         return VStack(alignment: .leading, spacing: DroppySpacing.md) {
             HStack(spacing: DroppySpacing.smd) {
@@ -1453,11 +1450,15 @@ struct SessionFocus: View {
                     Text(session?.title ?? "Session")
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                    HStack(spacing: 4) {
-                        Text(verbatim: meta)
+                    HStack(spacing: 0) {
+                        // Who runs it keeps its room, then the branch; the project gives way
+                        // first, and its spaces go with it.
+                        Text(verbatim: runner).layoutPriority(2)
+                        if let project = session?.project {
+                            Text(verbatim: " · \(project)")
+                        }
                         if let branch {
-                            // The branch keeps its room; the project gives way first.
-                            (Text(verbatim: "· ") + Text(Image(systemName: "arrow.triangle.branch")) + Text(verbatim: " \(branch)"))
+                            (Text(verbatim: " · ") + Text(Image(systemName: "arrow.triangle.branch")) + Text(verbatim: " \(branch)"))
                                 .layoutPriority(1)
                         }
                     }
